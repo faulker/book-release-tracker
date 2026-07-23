@@ -1,0 +1,8 @@
+{
+  "data": {
+    "series": [
+      { "id": 202, "name": "Expanse Companion", "slug": null, "is_completed": null },
+      { "id": 101, "name": "The Expanse", "slug": "the-expanse", "is_completed": true }
+    ]
+  }
+}

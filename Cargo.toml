@@ -1,0 +1,34 @@
+[package]
+name = "book-release-tracker"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+askama = "0.16.0"
+askama_web = { version = "0.16.0", features = ["axum-0.8"] }
+async-trait = "0.1.91"
+axum = "0.8.9"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.4", features = ["derive"] }
+lettre = { version = "0.11.22", default-features = false, features = ["tokio1-rustls", "smtp-transport", "builder", "ring", "webpki-roots"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "derive", "macros"] }
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["full"] }
+toml = "1.1.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# Only used for matching.rs's NFKC step (series-name normalization); a
+# pure-std lowercase/strip approach can't fold composed vs. decomposed
+# accented characters to the same string, which real ABS/Hardcover series
+# names do differ on.
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+# tower's ServiceExt::oneshot drives the axum router directly in handler tests.
+tower = { version = "0.5.2", features = ["util"] }
+wiremock = "0.6.5"

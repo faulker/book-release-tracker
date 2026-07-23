@@ -1,0 +1,6 @@
+{
+  "data": null,
+  "errors": [
+    { "message": "field 'series' not found in type: 'query_root'" }
+  ]
+}

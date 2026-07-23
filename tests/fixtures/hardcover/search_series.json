@@ -1,0 +1,13 @@
+{
+  "data": {
+    "search": {
+      "results": {
+        "found": 2,
+        "hits": [
+          { "document": { "id": "101", "name": "The Expanse", "readers_count": 12345 } },
+          { "document": { "id": "202", "name": "Expanse Companion" } }
+        ]
+      }
+    }
+  }
+}

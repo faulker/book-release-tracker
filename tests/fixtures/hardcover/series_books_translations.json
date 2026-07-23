@@ -1,0 +1,39 @@
+{
+  "data": {
+    "book_series": [
+      {
+        "position": 1.0,
+        "book": {
+          "id": 1001,
+          "title": "Leviathan Wakes",
+          "release_date": "2011-06-15",
+          "editions": [{ "asin": "B005QJTNQC" }],
+          "language_editions": [
+            { "language": { "code2": "en" } },
+            { "language": { "code2": "de" } }
+          ]
+        }
+      },
+      {
+        "position": 1.0,
+        "book": {
+          "id": 1099,
+          "title": "Leviathan erwacht",
+          "release_date": "2017-11-13",
+          "editions": [],
+          "language_editions": [{ "language": { "code2": "de" } }]
+        }
+      },
+      {
+        "position": 2.0,
+        "book": {
+          "id": 1002,
+          "title": "Caliban's War",
+          "release_date": "2012-06-26",
+          "editions": [],
+          "language_editions": [{ "language": null }]
+        }
+      }
+    ]
+  }
+}

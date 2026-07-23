@@ -1,0 +1,46 @@
+# Example config for book-release-tracker. Copy to config.toml and fill in secrets,
+# or leave them blank and set the corresponding env var instead.
+
+[audiobookshelf]
+base_url = "https://audiobookshelf"
+api_key = ""                    # or env BRT_ABS_API_KEY
+library_ids = []                 # empty = all libraries
+startup_timeout_secs = 300       # daemon mode: wait up to this long for ABS to
+                                 # answer /ping before the first check (covers ABS
+                                 # starting after us in the same container). 0 = no wait.
+
+[hardcover]
+token = ""                       # or env BRT_HARDCOVER_TOKEN
+min_request_interval_ms = 1100   # client-side throttle
+max_retries = 3                  # 429/5xx exponential backoff
+language = "en"                  # ISO 639-1; drops series books whose editions
+                                 # are all in other languages (translations).
+                                 # "" disables the filter.
+
+[audnexus]
+enabled = true
+region = "us"
+
+[check]
+interval_days = 7                # days between scheduled checks (daemon mode).
+                                 # The dashboard offers daily/weekly/monthly presets.
+db_path = "book-tracker.db"
+
+[dashboard]
+enabled = true                   # daemon mode only
+bind = "127.0.0.1:8091"        # use "0.0.0.0:8091" to allow external access
+
+[notify.ntfy]
+enabled = false
+server = "https://ntfy.sh"
+topic = ""
+token = ""                       # optional, env BRT_NTFY_TOKEN
+
+[notify.email]
+enabled = false
+smtp_host = ""
+smtp_port = 587
+username = ""
+password = ""                    # or env BRT_SMTP_PASSWORD
+from = ""
+to = ""

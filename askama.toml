@@ -1,0 +1,4 @@
+# askama template lookup: templates live next to the web module rather than
+# in a top-level templates/ dir, per the project layout in PLAN.md.
+[general]
+dirs = ["src/web/templates"]

@@ -1,0 +1,74 @@
+{
+  "results": [
+    {
+      "id": "li_1",
+      "ino": "1000001",
+      "libraryId": "lib_c1u2c",
+      "folderId": "folder_1",
+      "path": "/audiobooks/The Expanse/01 - Leviathan Wakes",
+      "isFile": false,
+      "mediaType": "book",
+      "media": {
+        "libraryItemId": "li_1",
+        "metadata": {
+          "title": "Leviathan Wakes",
+          "authorName": "James S. A. Corey",
+          "narratorName": "Jefferson Mays",
+          "series": [
+            { "id": "ser_1", "name": "The Expanse", "sequence": "1" }
+          ],
+          "genres": ["Science Fiction"],
+          "publishedYear": "2011",
+          "isbn": "9780316129084",
+          "asin": "B0064CGH1W",
+          "language": "English",
+          "explicit": false
+        }
+      }
+    },
+    {
+      "id": "li_2",
+      "ino": "1000002",
+      "libraryId": "lib_c1u2c",
+      "folderId": "folder_1",
+      "path": "/audiobooks/The Expanse/02 - Caliban's War",
+      "isFile": false,
+      "mediaType": "book",
+      "media": {
+        "libraryItemId": "li_2",
+        "metadata": {
+          "title": "Caliban's War",
+          "authorName": "James S. A. Corey",
+          "narratorName": "Jefferson Mays",
+          "series": [
+            { "id": "ser_1", "name": "The Expanse", "sequence": "2" }
+          ],
+          "genres": ["Science Fiction"],
+          "publishedYear": "2012",
+          "isbn": "",
+          "asin": "",
+          "language": "English",
+          "explicit": false
+        }
+      }
+    },
+    {
+      "id": "li_3",
+      "ino": "1000003",
+      "libraryId": "lib_c1u2c",
+      "folderId": "folder_1",
+      "path": "/audiobooks/The Expanse/03 - Abaddon's Gate",
+      "isFile": false,
+      "mediaType": "book",
+      "media": {
+        "libraryItemId": "li_3",
+        "metadata": {
+          "title": "Abaddon's Gate"
+        }
+      }
+    }
+  ],
+  "total": 3,
+  "limit": 100,
+  "page": 0
+}

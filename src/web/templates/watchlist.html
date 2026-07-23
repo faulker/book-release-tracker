@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Watchlist - book-release-tracker{% endblock %}
+
+{% block content %}
+<h1>Watchlist</h1>
+<p class="lede">Releases you asked to be reminded about. Each reminder fires once, the configured number of days before or after the release date, through every enabled notification channel.</p>
+
+{% if rows.is_empty() %}
+<p class="empty">Nothing watched yet — add books from the Upcoming page.</p>
+{% else %}
+<div class="table-scroll">
+<table id="watchlist-table">
+  <thead>
+    <tr><th>Series</th><th>Title</th><th>#</th><th>Release date</th><th>When</th><th>Reminder</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for row in rows %}
+  <tr>
+    <td>{{ row.series }}</td>
+    <td class="title-cell">{{ row.title }}</td>
+    <td>{{ row.position }}</td>
+    <td class="date">{{ row.release_date }}</td>
+    <td class="muted">{{ row.when }}</td>
+    <td>
+      {% if row.reminded %}
+      <span class="status status-ok">sent</span>
+      {% else %}
+      <form class="inline" method="post" action="/watch">
+        <input type="hidden" name="release_id" value="{{ row.id }}">
+        <input type="hidden" name="back" value="/watchlist">
+        <label><input type="number" name="remind_days" class="days" value="{{ row.remind_days }}" min="0" max="365" aria-label="Days from release to remind"> d</label>
+        <select name="remind_when" aria-label="Before or after release">
+          <option value="before" {% if !row.remind_after %}selected{% endif %}>before</option>
+          <option value="after" {% if row.remind_after %}selected{% endif %}>after</option>
+        </select>
+        <button type="submit" class="quiet">Update</button>
+      </form>
+      {% endif %}
+    </td>
+    <td>
+      <form class="inline" method="post" action="/watch/remove">
+        <input type="hidden" name="release_id" value="{{ row.id }}">
+        <input type="hidden" name="back" value="/watchlist">
+        <button type="submit" class="quiet">Remove</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

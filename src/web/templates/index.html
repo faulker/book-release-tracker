@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Status - book-release-tracker{% endblock %}
+
+{% block content %}
+{% if !flash.is_empty() %}<div class="flash">{{ flash }}</div>{% endif %}
+<h1>Status</h1>
+<p class="lede">Checking {{ interval_label }}. Scheduled checks are partial: series with a book already dated in the future are left alone until that date passes. The Run buttons below always scan.</p>
+
+<div class="ledger">
+  <a href="/series"><div class="figure">{{ series_count }}</div><div class="label">series tracked</div></a>
+  <a href="/upcoming"><div class="figure">{{ upcoming_count }}</div><div class="label">upcoming</div></a>
+  <a href="/new"><div class="figure">{{ new_count }}</div><div class="label">new releases</div></a>
+  <a href="/watchlist"><div class="figure">{{ watched_count }}</div><div class="label">watched</div></a>
+  <a href="/unmatched"><div class="figure">{{ unmatched_count }}</div><div class="label">unmatched</div></a>
+</div>
+
+<div class="actions">
+  <form method="post" action="/check">
+    <input type="hidden" name="mode" value="partial">
+    <button type="submit">Run check</button>
+  </form>
+  <form method="post" action="/check">
+    <input type="hidden" name="mode" value="full">
+    <button type="submit" class="ghost">Run full scan</button>
+  </form>
+</div>
+
+<h2>Check history</h2>
+{% if runs.is_empty() %}
+<p class="empty">No check runs yet — the first one starts with the daemon.</p>
+{% else %}
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Status</th><th>Started</th><th>Finished</th><th>Series</th><th>Events</th><th>Errors</th></tr>
+  </thead>
+  <tbody>
+  {% for run in runs %}
+  <tr>
+    <td><span class="status status-{{ run.status }}">{{ run.status }}</span></td>
+    <td class="muted">{{ run.started_at }}</td>
+    <td class="muted">{{ run.finished_at }}</td>
+    <td>{{ run.series_checked }}</td>
+    <td>{{ run.events_found }}</td>
+    <td class="muted">{{ run.errors }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

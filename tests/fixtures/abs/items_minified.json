@@ -1,0 +1,61 @@
+{
+  "results": [
+    {
+      "id": "li_10",
+      "ino": "2000010",
+      "libraryId": "lib_c1u2c",
+      "folderId": "folder_1",
+      "path": "/audiobooks/Sample Author/Sample Series/Book One",
+      "isFile": false,
+      "mediaType": "book",
+      "media": {
+        "libraryItemId": "li_10",
+        "metadata": {
+          "title": "Sample Series Book One",
+          "authorName": "Sample Author",
+          "series": { "id": "ser_9", "name": "Sample Series", "sequence": null },
+          "genres": [],
+          "publishedYear": "2013",
+          "isbn": null,
+          "asin": null,
+          "language": null,
+          "explicit": false
+        }
+      }
+    },
+    {
+      "id": "li_11",
+      "ino": "2000011",
+      "libraryId": "lib_c1u2c",
+      "folderId": "folder_1",
+      "path": "/audiobooks/Sample Author/Sample Series/Book Two",
+      "isFile": false,
+      "mediaType": "book",
+      "media": {
+        "libraryItemId": "li_11",
+        "metadata": {
+          "title": "Sample Series Book Two",
+          "authorName": "Sample Author",
+          "series": { "id": "ser_9", "name": "Sample Series", "sequence": 2 },
+          "genres": [],
+          "publishedYear": "2014",
+          "isbn": null,
+          "asin": "B00SAMPLE2",
+          "language": "English",
+          "explicit": false
+        }
+      }
+    }
+  ],
+  "total": 2,
+  "limit": 2,
+  "page": 0,
+  "sortBy": "media.metadata.series.sequence",
+  "sortDesc": false,
+  "filterBy": "series.c2VyXzk=",
+  "mediaType": "book",
+  "minified": false,
+  "collapseseries": false,
+  "include": "",
+  "offset": 0
+}

@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - book-release-tracker{% endblock %}
+
+{% block content %}
+<style>
+  .settings fieldset {
+    border: 1px solid var(--rule); border-radius: 3px;
+    margin: 0 0 1.6rem; padding: 0.9rem 1.2rem 1.2rem;
+  }
+  .settings legend {
+    font-family: var(--serif); font-size: 1.05rem; font-weight: 600;
+    padding: 0 0.5rem;
+  }
+  .settings .field { display: flex; flex-wrap: wrap; gap: 0.3rem 1rem; align-items: baseline; margin: 0.55rem 0; }
+  .settings .field > label:first-child {
+    width: 13rem; font-size: 0.82rem; color: var(--ink-soft);
+  }
+  .settings input[type="text"], .settings input[type="password"], .settings input[type="number"], .settings input[type="url"], .settings select {
+    font: inherit; font-size: 0.88rem; color: var(--ink);
+    background: var(--paper-raised); border: 1px solid var(--rule);
+    border-radius: 2px; padding: 0.35rem 0.6rem; width: min(24rem, 100%);
+  }
+  .settings input[type="number"] { width: 8rem; }
+  .settings select { width: min(16rem, 100%); }
+  .settings input:focus, .settings select:focus { outline: none; border-color: var(--accent); }
+  .settings input[aria-invalid="true"] { border-color: var(--bad); background: color-mix(in oklch, var(--bad) 8%, var(--paper-raised)); }
+  .settings .hint { font-size: 0.78rem; color: var(--ink-soft); flex-basis: 100%; margin-left: 14rem; }
+  @media (max-width: 40rem) { .settings .hint { margin-left: 0; } }
+  .settings label.check { font-size: 0.88rem; display: flex; gap: 0.45rem; align-items: center; cursor: pointer; }
+  .settings .actions { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+  .form-errors {
+    border-left: 3px solid var(--bad); background: var(--paper-raised);
+    padding: 0.6rem 0.9rem; margin: 0 0 1.4rem;
+  }
+  .form-errors strong { font-family: var(--serif); }
+  .form-errors ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+  .form-errors li { font-size: 0.85rem; }
+</style>
+
+<h1>Settings</h1>
+<p class="lede">Edits <code>{{ config_path }}</code> directly. Saved changes take effect the next time the daemon starts; comments in the file are not preserved.</p>
+
+{% if !flash.is_empty() %}
+<p class="flash">{{ flash }}</p>
+{% endif %}
+
+{% if !errors.is_empty() %}
+<div class="form-errors">
+  <strong>Settings not saved. Please fix:</strong>
+  <ul>
+    {% for error in errors %}<li>{{ error }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<form class="settings" method="post" action="/settings">
+  <fieldset>
+    <legend>Audiobookshelf</legend>
+    <div class="field">
+      <label for="abs_base_url">Base URL</label>
+      <input type="url" id="abs_base_url" name="abs_base_url" value="{{ abs_base_url }}" required{% if error_fields.contains("abs_base_url") %} aria-invalid="true"{% endif %}>
+    </div>
+    <div class="field">
+      <label for="abs_api_key">API key</label>
+      {% if abs_api_key_set %}
+      <input type="password" id="abs_api_key" name="abs_api_key" placeholder="currently set; leave blank to keep" autocomplete="off">
+      {% else %}
+      <input type="password" id="abs_api_key" name="abs_api_key" placeholder="not set" autocomplete="off"{% if error_fields.contains("abs_api_key") %} aria-invalid="true"{% endif %}>
+      {% endif %}
+      <span class="hint">Env var BRT_ABS_API_KEY overrides this at startup.</span>
+    </div>
+    <div class="field">
+      <label for="abs_library_ids">Library ids</label>
+      <input type="text" id="abs_library_ids" name="abs_library_ids" value="{{ abs_library_ids }}">
+      <span class="hint">Comma-separated; empty means all libraries.</span>
+    </div>
+    <div class="field">
+      <label for="abs_startup_timeout_secs">Startup wait (seconds)</label>
+      <input type="number" id="abs_startup_timeout_secs" name="abs_startup_timeout_secs" min="0" value="{{ abs_startup_timeout_secs }}" required>
+      <span class="hint">How long the daemon waits for Audiobookshelf to come up before its first check. 0 disables the wait.</span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Hardcover</legend>
+    <div class="field">
+      <label for="hc_token">API token</label>
+      {% if hc_token_set %}
+      <input type="password" id="hc_token" name="hc_token" placeholder="currently set; leave blank to keep" autocomplete="off">
+      {% else %}
+      <input type="password" id="hc_token" name="hc_token" placeholder="not set" autocomplete="off"{% if error_fields.contains("hc_token") %} aria-invalid="true"{% endif %}>
+      {% endif %}
+      <span class="hint">Env var BRT_HARDCOVER_TOKEN overrides this at startup.</span>
+    </div>
+    <div class="field">
+      <label for="hc_min_request_interval_ms">Min request interval (ms)</label>
+      <input type="number" id="hc_min_request_interval_ms" name="hc_min_request_interval_ms" value="{{ hc_min_request_interval_ms }}" min="0" required>
+    </div>
+    <div class="field">
+      <label for="hc_max_retries">Max retries</label>
+      <input type="number" id="hc_max_retries" name="hc_max_retries" value="{{ hc_max_retries }}" min="0" required>
+    </div>
+    <div class="field">
+      <label for="hc_language">Language</label>
+      <input type="text" id="hc_language" name="hc_language" value="{{ hc_language }}" maxlength="2">
+      <span class="hint">ISO 639-1 code, e.g. "en"; blank disables translation filtering.</span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Audnexus</legend>
+    <div class="field">
+      <label class="check"><input type="checkbox" name="audnexus_enabled" value="1" {% if audnexus_enabled %}checked{% endif %}> Enabled</label>
+    </div>
+    <div class="field">
+      <label for="audnexus_region">Region</label>
+      <input type="text" id="audnexus_region" name="audnexus_region" value="{{ audnexus_region }}" required>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Checks</legend>
+    <div class="field">
+      <label for="check_interval_days">Check frequency</label>
+      <select id="check_interval_days" name="check_interval_days">
+        {% for option in interval_options %}
+        <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+        {% endfor %}
+      </select>
+      <span class="hint">How often the daemon runs a scheduled check.</span>
+    </div>
+    <div class="field">
+      <label for="check_db_path">Database path</label>
+      <input type="text" id="check_db_path" name="check_db_path" value="{{ check_db_path }}" required>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Dashboard</legend>
+    <div class="field">
+      <label class="check"><input type="checkbox" name="dashboard_enabled" value="1" {% if dashboard_enabled %}checked{% endif %}> Enabled</label>
+    </div>
+    <div class="field">
+      <label for="dashboard_bind">Bind address</label>
+      <input type="text" id="dashboard_bind" name="dashboard_bind" value="{{ dashboard_bind }}" required>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Notifications: ntfy</legend>
+    <div class="field">
+      <label class="check"><input type="checkbox" name="ntfy_enabled" value="1" {% if ntfy_enabled %}checked{% endif %}> Enabled</label>
+    </div>
+    <div class="field">
+      <label for="ntfy_server">Server</label>
+      <input type="text" id="ntfy_server" name="ntfy_server" value="{{ ntfy_server }}"{% if error_fields.contains("ntfy_server") %} aria-invalid="true"{% endif %}>
+    </div>
+    <div class="field">
+      <label for="ntfy_topic">Topic</label>
+      <input type="text" id="ntfy_topic" name="ntfy_topic" value="{{ ntfy_topic }}"{% if error_fields.contains("ntfy_topic") %} aria-invalid="true"{% endif %}>
+    </div>
+    <div class="field">
+      <label for="ntfy_token">Token</label>
+      {% if ntfy_token_set %}
+      <input type="password" id="ntfy_token" name="ntfy_token" placeholder="currently set; leave blank to keep" autocomplete="off">
+      {% else %}
+      <input type="password" id="ntfy_token" name="ntfy_token" placeholder="not set (optional)" autocomplete="off">
+      {% endif %}
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Notifications: email</legend>
+    <div class="field">
+      <label class="check"><input type="checkbox" name="email_enabled" value="1" {% if email_enabled %}checked{% endif %}> Enabled</label>
+    </div>
+    <div class="field">
+      <label for="email_smtp_host">SMTP host</label>
+      <input type="text" id="email_smtp_host" name="email_smtp_host" value="{{ email_smtp_host }}"{% if error_fields.contains("email_smtp_host") %} aria-invalid="true"{% endif %}>
+    </div>
+    <div class="field">
+      <label for="email_smtp_port">SMTP port</label>
+      <input type="number" id="email_smtp_port" name="email_smtp_port" value="{{ email_smtp_port }}" min="1" max="65535" required>
+    </div>
+    <div class="field">
+      <label for="email_username">Username</label>
+      <input type="text" id="email_username" name="email_username" value="{{ email_username }}" autocomplete="off">
+      <span class="hint">Optional. Leave username and password blank for relays that accept unauthenticated mail.</span>
+    </div>
+    <div class="field">
+      <label for="email_password">Password</label>
+      {% if email_password_set %}
+      <input type="password" id="email_password" name="email_password" placeholder="currently set; leave blank to keep" autocomplete="off">
+      {% else %}
+      <input type="password" id="email_password" name="email_password" placeholder="not set (optional)" autocomplete="off"{% if error_fields.contains("email_password") %} aria-invalid="true"{% endif %}>
+      {% endif %}
+      <span class="hint">Env var BRT_SMTP_PASSWORD overrides this at startup.</span>
+    </div>
+    <div class="field">
+      <label for="email_from">From</label>
+      <input type="text" id="email_from" name="email_from" value="{{ email_from }}"{% if error_fields.contains("email_from") %} aria-invalid="true"{% endif %}>
+    </div>
+    <div class="field">
+      <label for="email_to">To</label>
+      <input type="text" id="email_to" name="email_to" value="{{ email_to }}"{% if error_fields.contains("email_to") %} aria-invalid="true"{% endif %}>
+    </div>
+    <div class="field">
+      <button type="submit" class="ghost" formaction="/settings/test-email" formnovalidate>Send test email</button>
+      <span class="hint">Sends a test message using the values above (no need to save first).</span>
+    </div>
+  </fieldset>
+
+  <div class="actions">
+    <button type="submit">Save settings</button>
+  </div>
+</form>
+{% endblock %}

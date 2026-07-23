@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Unmatched - book-release-tracker{% endblock %}
+
+{% block content %}
+<h1>Unmatched series</h1>
+<p class="lede">Series the matcher couldn't resolve. Paste the Hardcover series id, or tick ignore to stop trying.</p>
+{% if rows.is_empty() %}
+<p class="empty">Every series is matched.</p>
+{% else %}
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>ABS series</th><th>Status</th><th>Override</th></tr>
+  </thead>
+  <tbody>
+  {% for row in rows %}
+  <tr>
+    <td class="title-cell">{{ row.abs_name }}</td>
+    <td><span class="status status-{{ row.status }}">{{ row.status }}</span></td>
+    <td>
+      <form class="inline" method="post" action="/overrides">
+        <input type="hidden" name="abs_name" value="{{ row.abs_name }}">
+        <input type="text" name="hardcover_series_id" placeholder="Hardcover series id">
+        <label><input type="checkbox" name="ignore" value="1"> ignore</label>
+        <button type="submit" class="ghost">Save</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

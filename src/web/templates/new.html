@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}New releases - book-release-tracker{% endblock %}
+
+{% block content %}
+<h1>New releases</h1>
+<p class="lede">Released books you don't own yet, newest first.</p>
+{% if rows.is_empty() %}
+<p class="empty">No new releases — your library is up to date.</p>
+{% else %}
+<div class="filter-bar">
+  <input type="search" data-filter="new-table" placeholder="Filter by series or author&hellip;" aria-label="Filter releases">
+</div>
+<div class="table-scroll">
+<table id="new-table">
+  <thead>
+    <tr><th>Series</th><th>Author</th><th>Title</th><th>#</th><th>Release date</th><th>When</th></tr>
+  </thead>
+  <tbody>
+  {% for row in rows %}
+  <tr data-search="{{ row.series }} {{ row.author }}">
+    <td>
+      {% if !row.series_url.is_empty() %}
+      <a href="{{ row.series_url }}" target="_blank" rel="noopener">{{ row.series }}</a>
+      {% else %}
+      {{ row.series }}
+      {% endif %}
+    </td>
+    <td class="muted">
+      {% for author in row.authors %}{% if !loop.first %}, {% endif %}<a href="{{ author.url }}" target="_blank" rel="noopener">{{ author.name }}</a>{% endfor %}
+    </td>
+    <td class="title-cell">
+      {% if !row.book_url.is_empty() %}
+      <a href="{{ row.book_url }}" target="_blank" rel="noopener">{{ row.title }}</a>
+      {% else %}
+      {{ row.title }}
+      {% endif %}
+    </td>
+    <td>{{ row.position }}</td>
+    <td class="date">{{ row.release_date }}</td>
+    <td class="muted">{{ row.when }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

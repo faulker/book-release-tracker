@@ -1,0 +1,19 @@
+{
+  "results": [
+    {
+      "id": "ser_1",
+      "name": "The Expanse",
+      "description": "A series of science fiction novels.",
+      "addedAt": 1650000000000,
+      "nameIgnorePrefix": "Expanse, The",
+      "books": [
+        { "id": "li_1" },
+        { "id": "li_2" },
+        { "id": "li_3" }
+      ]
+    }
+  ],
+  "total": 1,
+  "limit": 100,
+  "page": 0
+}

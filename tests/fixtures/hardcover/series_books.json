@@ -1,0 +1,28 @@
+{
+  "data": {
+    "book_series": [
+      {
+        "position": 1.0,
+        "book": {
+          "id": 1001,
+          "title": "Leviathan Wakes",
+          "release_date": "2011-06-15",
+          "editions": [{ "asin": "B005QJTNQC" }]
+        }
+      },
+      {
+        "position": 2.0,
+        "book": {
+          "id": 1002,
+          "title": "Caliban's War",
+          "release_date": "2012-06-26",
+          "editions": []
+        }
+      },
+      {
+        "position": 8.5,
+        "book": { "id": 1008, "title": "Gods of Risk", "release_date": null }
+      }
+    ]
+  }
+}

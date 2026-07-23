@@ -1,0 +1,28 @@
+{
+  "libraries": [
+    {
+      "id": "lib_c1u2c",
+      "name": "Audiobooks",
+      "folders": [],
+      "displayOrder": 1,
+      "icon": "audiobookshelf",
+      "provider": "audible",
+      "mediaType": "book",
+      "settings": {},
+      "createdAt": 1650000000000,
+      "lastUpdate": 1650000000000
+    },
+    {
+      "id": "lib_podcasts01",
+      "name": "Podcasts",
+      "folders": [],
+      "displayOrder": 2,
+      "icon": "podcast",
+      "provider": "itunes",
+      "mediaType": "podcast",
+      "settings": {},
+      "createdAt": 1650000000000,
+      "lastUpdate": 1650000000000
+    }
+  ]
+}
