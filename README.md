@@ -2,6 +2,8 @@
 
 Watches your [Audiobookshelf](https://www.audiobookshelf.org/) series, matches them against [Hardcover](https://hardcover.app/), and alerts you when a new book in a series you're following gets released or announced. Alerts go out via log, [ntfy](https://ntfy.sh/), and/or email, and a web dashboard shows what's upcoming, what's new, and which series still need a manual match.
 
+[Project page on sleepymagpie.com](https://sleepymagpie.com/tools/book-release-tracker.html)
+
 ## Requirements
 
 - Rust (stable toolchain)

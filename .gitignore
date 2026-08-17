@@ -3,3 +3,4 @@ book-tracker.db
 target
 config.toml
 .logclaude
+.DS_Store

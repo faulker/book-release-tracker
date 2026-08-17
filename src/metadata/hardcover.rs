@@ -145,7 +145,7 @@ impl HardcoverClient {
             let parsed: GraphQlResponse<T> = response
                 .json()
                 .await
-                .map_err(|e| MetadataError::Decode(e.to_string()))?;
+                .map_err(|e| MetadataError::Decode(error_chain(&e)))?;
 
             if let Some(errors) = parsed.errors
                 && !errors.is_empty()
@@ -309,6 +309,32 @@ impl MetadataSource for HardcoverClient {
     }
 }
 
+/// Hardcover serves Postgres dates verbatim, so ancient works come back as BC
+/// dates (e.g. Plato's dialogues carry `"0376-01-01 BC"`), which chrono's
+/// `NaiveDate` deserializer rejects and which would otherwise fail the whole
+/// series. Anything that isn't a plain `YYYY-MM-DD` date is treated as "no
+/// known release date".
+fn deserialize_lenient_date<'de, D>(deserializer: D) -> Result<Option<chrono::NaiveDate>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<String> = Option::deserialize(deserializer)?;
+    Ok(raw.and_then(|s| chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()))
+}
+
+/// reqwest's `Display` for a body-decode failure is just "error decoding
+/// response body for url (...)"; the serde detail that says *what* didn't fit
+/// lives in the source chain, so flatten the whole chain into the message.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = err.source();
+    while let Some(e) = source {
+        parts.push(e.to_string());
+        source = e.source();
+    }
+    parts.join(": ")
+}
+
 /// Exponential backoff with a little jitter: ~1s, ~2s, ~4s, ... for `attempt` 0, 1, 2, ...
 fn backoff(attempt: u32) -> Duration {
     let base_ms = 1000u64.saturating_mul(1u64 << attempt.min(10));
@@ -418,6 +444,7 @@ struct BookSeriesRow {
 struct BookRow {
     id: i64,
     title: String,
+    #[serde(default, deserialize_with = "deserialize_lenient_date")]
     release_date: Option<chrono::NaiveDate>,
     #[serde(default)]
     editions: Vec<EditionRow>,
@@ -646,6 +673,59 @@ mod tests {
         assert_eq!(books[2].position, Some(8.5));
         assert!(books[2].release_date.is_none());
         assert!(books[2].asin.is_none());
+    }
+
+    #[tokio::test]
+    async fn series_books_treats_bc_dates_as_unknown_release_date() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(fixture("series_books_bc_dates.json")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server, "test-token");
+        let books = client.series_books("10595").await.expect("series_books");
+
+        // The BC date decodes to None instead of failing the whole series, and
+        // the ordinary date alongside it still parses.
+        assert_eq!(books.len(), 2);
+        assert_eq!(books[0].source_book_id, "759804");
+        assert!(books[0].release_date.is_none());
+        assert_eq!(
+            books[1].release_date,
+            Some(chrono::NaiveDate::from_ymd_opt(2012, 9, 27).unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn decode_failure_message_includes_serde_detail() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"data":{"book_series":[{"position":1,"book":{"id":"not-an-int","title":"X"}}]}}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server, "test-token");
+        let err = client
+            .series_books("101")
+            .await
+            .expect_err("expected Decode");
+
+        assert!(matches!(err, MetadataError::Decode(_)));
+        // The reqwest wrapper alone says only "error decoding response body";
+        // the flattened chain must carry the serde reason too.
+        assert!(
+            err.to_string().contains("invalid type"),
+            "expected serde detail in {err}"
+        );
     }
 
     #[tokio::test]

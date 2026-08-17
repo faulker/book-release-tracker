@@ -1,0 +1,26 @@
+{
+  "data": {
+    "book_series": [
+      {
+        "position": 3.0,
+        "book": {
+          "id": 759804,
+          "title": "Republic",
+          "release_date": "0401-01-01 BC",
+          "editions": [],
+          "language_editions": [{ "language": { "code2": "en" } }]
+        }
+      },
+      {
+        "position": 5.0,
+        "book": {
+          "id": 2153398,
+          "title": "Republic",
+          "release_date": "2012-09-27",
+          "editions": [{ "asin": "B009F2K1RG" }],
+          "language_editions": [{ "language": { "code2": "en" } }]
+        }
+      }
+    ]
+  }
+}
