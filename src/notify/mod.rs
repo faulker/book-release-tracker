@@ -356,6 +356,7 @@ mod tests {
             check: CheckConfig {
                 interval_days: 7,
                 db_path: "test.db".into(),
+                run_timeout_mins: 120,
             },
             dashboard: DashboardConfig {
                 enabled: false,

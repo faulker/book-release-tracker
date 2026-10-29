@@ -4,9 +4,9 @@
 
 {% block content %}
 <h1>Unmatched series</h1>
-<p class="lede">Series the matcher couldn't resolve. Paste the Hardcover series id, or tick ignore to stop trying.</p>
+<p class="lede">Series the matcher couldn't resolve, plus ones you matched by hand. Paste a Hardcover series URL or id (or change one you got wrong), or tick ignore to stop trying.</p>
 {% if rows.is_empty() %}
-<p class="empty">Every series is matched.</p>
+<p class="empty">Every series is matched automatically.</p>
 {% else %}
 <div class="table-scroll">
 <table>
@@ -16,12 +16,12 @@
   <tbody>
   {% for row in rows %}
   <tr>
-    <td class="title-cell">{{ row.abs_name }}</td>
+    <td class="title-cell"><a href="/series/{{ row.id }}">{{ row.abs_name }}</a></td>
     <td><span class="status status-{{ row.status }}">{{ row.status }}</span></td>
     <td>
       <form class="inline" method="post" action="/overrides">
         <input type="hidden" name="abs_name" value="{{ row.abs_name }}">
-        <input type="text" name="hardcover_series_id" placeholder="Hardcover series id">
+        <input type="text" name="hardcover_series_id" value="{{ row.hardcover_id }}" placeholder="Hardcover series URL or id" aria-label="Hardcover series URL or id">
         <label><input type="checkbox" name="ignore" value="1"> ignore</label>
         <button type="submit" class="ghost">Save</button>
       </form>

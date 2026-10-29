@@ -7,15 +7,15 @@ use std::collections::HashMap;
 use askama::Template;
 use askama_web::WebTemplate;
 use axum::Form;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 
-use crate::checker::ScanMode;
+use crate::checker::{self, ScanMode};
 use crate::config;
-use crate::db::models::{CheckRunStatus, KnownRelease, MatchStatus, Series};
+use crate::db::models::{CheckRunStatus, KnownRelease, MatchStatus, ReleaseStatus};
 use crate::db::queries::{self, QueryError};
 use crate::matching::normalize_series_name;
 
@@ -77,13 +77,17 @@ pub struct IndexQuery {
     flash: Option<String>,
 }
 
-/// `GET /`: check-run history plus upcoming/new/unmatched counts.
+/// `GET /status`: check-run history plus upcoming/new/unmatched counts.
 pub async fn index(
     State(state): State<AppState>,
     Query(query): Query<IndexQuery>,
 ) -> Result<IndexTemplate, WebError> {
     let runs = queries::recent_check_runs(&state.pool, RUN_HISTORY_LIMIT).await?;
-    let series_count = queries::list_series(&state.pool).await?.len();
+    let series_count = queries::list_series(&state.pool)
+        .await?
+        .iter()
+        .filter(|series| series.archived_at.is_none())
+        .count();
     let upcoming_count = queries::list_upcoming_releases(&state.pool).await?.len();
     let new_count = queries::list_new_releases(&state.pool).await?.len();
     let watched_count = queries::watched_release_ids(&state.pool).await?.len();
@@ -324,13 +328,31 @@ pub struct WatchForm {
     pub back: String,
 }
 
-/// Only redirect to pages the watch buttons actually live on; anything else
+/// Only return to pages the watch buttons actually live on; anything else
 /// lands on the watchlist.
-fn watch_redirect(back: &str) -> Redirect {
+fn watch_back(back: &str) -> &str {
     match back {
-        "/upcoming" | "/watchlist" => Redirect::to(back),
-        _ => Redirect::to("/watchlist"),
+        "/upcoming" | "/watchlist" => back,
+        _ if is_series_detail_path(back) => back,
+        _ => "/watchlist",
     }
+}
+
+/// Redirects back to `path` with `?error=` set; `base.html` shows it as a
+/// popover on that page instead of navigating to a bare error body.
+fn error_redirect(path: &str, message: &str) -> Response {
+    let query = reqwest::Url::parse_with_params("http://localhost/", [("error", message)])
+        .ok()
+        .and_then(|url| url.query().map(str::to_string))
+        .unwrap_or_default();
+    Redirect::to(&format!("{path}?{query}")).into_response()
+}
+
+/// True for `/series/{numeric id}`, the detail pages that host watch and
+/// override forms.
+fn is_series_detail_path(path: &str) -> bool {
+    path.strip_prefix("/series/")
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `POST /watch`: adds a release to the watch list (or updates its reminder
@@ -341,34 +363,33 @@ pub async fn add_watch(
     State(state): State<AppState>,
     Form(form): Form<WatchForm>,
 ) -> Result<Response, WebError> {
+    let back = watch_back(&form.back);
     let days = form.remind_days.unwrap_or(1);
     if !(0..=365).contains(&days) {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            "remind_days must be between 0 and 365",
-        )
-            .into_response());
+        return Ok(error_redirect(
+            back,
+            "Reminder days must be between 0 and 365.",
+        ));
     }
     let offset = match form.remind_when.as_deref().unwrap_or("before") {
         "before" => -days,
         "after" => days,
         _ => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                "remind_when must be \"before\" or \"after\"",
-            )
-                .into_response());
+            return Ok(error_redirect(
+                back,
+                "Reminder must be \"before\" or \"after\" the release.",
+            ));
         }
     };
     if queries::get_known_release(&state.pool, form.release_id)
         .await?
         .is_none()
     {
-        return Ok((StatusCode::NOT_FOUND, "no such release").into_response());
+        return Ok(error_redirect(back, "That release no longer exists."));
     }
 
     queries::add_watch(&state.pool, form.release_id, offset).await?;
-    Ok(watch_redirect(&form.back).into_response())
+    Ok(Redirect::to(back).into_response())
 }
 
 /// `POST /watch/remove`: drops a release from the watch list.
@@ -377,7 +398,7 @@ pub async fn remove_watch(
     Form(form): Form<WatchForm>,
 ) -> Result<Response, WebError> {
     queries::remove_watch(&state.pool, form.release_id).await?;
-    Ok(watch_redirect(&form.back).into_response())
+    Ok(Redirect::to(watch_back(&form.back)).into_response())
 }
 
 /// Series overview page: every tracked series with its release outlook and
@@ -393,10 +414,13 @@ pub struct SeriesTemplate {
 /// recent past release date (the "nothing coming" case the page must always
 /// show a last date for, when one is known).
 struct SeriesRow {
+    id: i64,
     abs_name: String,
     authors: String,
     status: &'static str,
     ignored: bool,
+    /// No longer listed in ABS; hidden unless the archived filter is chosen.
+    archived: bool,
     /// "1" when a next release is scheduled, "0" otherwise; rendered as a
     /// data attribute the hide-unscheduled toggle filters on.
     scheduled: &'static str,
@@ -418,9 +442,11 @@ pub async fn series(State(state): State<AppState>) -> Result<SeriesTemplate, Web
             .map(|row| {
                 let has_next = row.next_release_date.is_some();
                 SeriesRow {
+                    id: row.id,
                     authors: row.authors.as_deref().map(fmt_authors).unwrap_or_default(),
-                    status: match_status_label(row.match_status),
+                    status: series_status_label(row.match_status, row.archived_at.is_some()),
                     ignored: row.match_status == MatchStatus::Ignored,
+                    archived: row.archived_at.is_some(),
                     scheduled: if has_next { "1" } else { "0" },
                     next_title: row.next_title.unwrap_or_default(),
                     next_date: row
@@ -447,6 +473,106 @@ pub async fn series(State(state): State<AppState>) -> Result<SeriesTemplate, Web
     })
 }
 
+/// Series detail page: every known book of one series, split into released
+/// and upcoming, with watch buttons on upcoming books and a form to change
+/// the Hardcover match.
+#[derive(Template, WebTemplate)]
+#[template(path = "series_detail.html")]
+pub struct SeriesDetailTemplate {
+    id: i64,
+    abs_name: String,
+    status: &'static str,
+    ignored: bool,
+    archived: bool,
+    /// Hardcover series page; empty when no slug is stored.
+    hardcover_url: String,
+    /// Currently matched Hardcover id, or the pending override id; prefills
+    /// the change-match form.
+    hardcover_id: String,
+    released: Vec<BookRow>,
+    upcoming: Vec<BookRow>,
+}
+
+/// One book on the series detail page.
+struct BookRow {
+    id: i64,
+    title: String,
+    /// Audible product page; empty when no ASIN is known.
+    book_url: String,
+    position: String,
+    release_date: String,
+    when: String,
+    owned: bool,
+    watched: bool,
+}
+
+/// `GET /series/{id}`: one series' released and upcoming books. 404 for an
+/// unknown id.
+pub async fn series_detail(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, WebError> {
+    let Some(series) = queries::get_series(&state.pool, id).await? else {
+        return Ok((StatusCode::NOT_FOUND, "no such series").into_response());
+    };
+    let releases = queries::list_series_releases(&state.pool, id).await?;
+    let watched = queries::watched_release_ids(&state.pool).await?;
+    let hardcover_id = match &series.hardcover_series_id {
+        Some(id) => id.clone(),
+        None => override_id(&state.pool, &series.abs_name).await?,
+    };
+
+    let today = Utc::now().date_naive();
+    let (mut released, mut upcoming) = (Vec::new(), Vec::new());
+    for release in &releases {
+        let row = BookRow {
+            id: release.id,
+            title: release.title.clone(),
+            book_url: book_url(release.asin.as_deref()),
+            position: fmt_position(release.position),
+            release_date: release
+                .release_date
+                .map(|date| date.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            when: release
+                .release_date
+                .map(|date| fmt_days_until(days_until(today, date)))
+                .unwrap_or_default(),
+            owned: release.status == ReleaseStatus::Owned,
+            watched: watched.contains(&release.id),
+        };
+        if release.status == ReleaseStatus::Upcoming {
+            upcoming.push(row);
+        } else {
+            released.push(row);
+        }
+    }
+
+    Ok(SeriesDetailTemplate {
+        id: series.id,
+        status: series_status_label(series.match_status, series.archived_at.is_some()),
+        ignored: series.match_status == MatchStatus::Ignored,
+        archived: series.archived_at.is_some(),
+        hardcover_url: series_url(series.hardcover_slug.as_deref()),
+        hardcover_id,
+        abs_name: series.abs_name,
+        released,
+        upcoming,
+    }
+    .into_response())
+}
+
+/// The Hardcover id stored in the override for `abs_name`, or empty when
+/// there is none.
+async fn override_id(pool: &sqlx::SqlitePool, abs_name: &str) -> Result<String, WebError> {
+    Ok(
+        queries::get_series_override(pool, &normalize_series_name(abs_name))
+            .await?
+            .and_then(|row| row.hardcover_series_id)
+            .unwrap_or_default(),
+    )
+}
+
 /// Form body for `POST /series/ignore`.
 #[derive(Debug, Deserialize)]
 pub struct IgnoreForm {
@@ -467,9 +593,10 @@ pub async fn set_ignore(
         "ignore" => true,
         "unignore" => false,
         _ => {
-            return Ok(
-                (StatusCode::BAD_REQUEST, "action must be ignore or unignore").into_response(),
-            );
+            return Ok(error_redirect(
+                "/series",
+                "Action must be ignore or unignore.",
+            ));
         }
     };
 
@@ -500,32 +627,44 @@ pub struct UnmatchedTemplate {
     rows: Vec<UnmatchedRow>,
 }
 
-/// One series awaiting a manual match decision (or already ignored).
+/// One series awaiting a manual match decision, or one matched by hand
+/// (overridden) so a wrong id can be corrected.
 struct UnmatchedRow {
+    id: i64,
     abs_name: String,
     status: &'static str,
+    /// Override id already entered for this series; prefills the form.
+    hardcover_id: String,
 }
 
-/// `GET /unmatched`: series the matcher could not resolve, plus ignored ones
-/// so an ignore can be reversed by entering an id.
+/// `GET /unmatched`: series the matcher could not resolve, plus series
+/// matched by manual override so the id can be changed. Ignored series are
+/// hidden here (unignore them from the series page).
 pub async fn unmatched(State(state): State<AppState>) -> Result<UnmatchedTemplate, WebError> {
     let mut series =
         queries::get_series_by_match_status(&state.pool, MatchStatus::Unmatched).await?;
-    series.extend(queries::get_series_by_match_status(&state.pool, MatchStatus::Ignored).await?);
+    series.extend(queries::get_series_by_match_status(&state.pool, MatchStatus::Overridden).await?);
 
-    Ok(UnmatchedTemplate {
-        rows: series
-            .into_iter()
-            .map(|series: Series| UnmatchedRow {
-                abs_name: series.abs_name,
-                status: match_status_label(series.match_status),
-            })
-            .collect(),
-    })
+    let mut rows = Vec::with_capacity(series.len());
+    for series in series {
+        let hardcover_id = match series.hardcover_series_id {
+            Some(id) => id,
+            None => override_id(&state.pool, &series.abs_name).await?,
+        };
+        rows.push(UnmatchedRow {
+            id: series.id,
+            status: match_status_label(series.match_status),
+            abs_name: series.abs_name,
+            hardcover_id,
+        });
+    }
+    Ok(UnmatchedTemplate { rows })
 }
 
 /// Form body for `POST /overrides`. `ignore` is a checkbox, so it's absent
-/// entirely when unchecked.
+/// entirely when unchecked. `hardcover_series_id` takes either a numeric id
+/// or a pasted Hardcover series page URL. `back` names the page to return
+/// to (the unmatched list or a series detail page).
 #[derive(Debug, Deserialize)]
 pub struct OverrideForm {
     pub abs_name: String,
@@ -533,34 +672,110 @@ pub struct OverrideForm {
     pub hardcover_series_id: String,
     #[serde(default)]
     pub ignore: Option<String>,
+    #[serde(default)]
+    pub back: String,
+}
+
+/// What the override form's id box holds.
+#[derive(Debug, PartialEq, Eq)]
+enum SeriesRef<'a> {
+    /// A numeric Hardcover series id.
+    Id(&'a str),
+    /// The slug from a pasted `hardcover.app/series/{slug}` URL.
+    Slug(&'a str),
+}
+
+/// Parses the override form's id box: digits are an id; anything containing
+/// `hardcover.app/series/` is a series page URL whose slug follows (scheme,
+/// `www.`, trailing path, query, and fragment are ignored). `None` for
+/// anything else.
+fn parse_series_ref(input: &str) -> Option<SeriesRef<'_>> {
+    let input = input.trim();
+    if !input.is_empty() && input.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(SeriesRef::Id(input));
+    }
+    let (_, rest) = input.split_once("hardcover.app/series/")?;
+    let slug = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    (!slug.is_empty()).then_some(SeriesRef::Slug(slug))
 }
 
 /// `POST /overrides`: stores a manual series override keyed by normalized ABS
-/// name, resets any series with that name back to `unmatched` so the next
-/// check re-runs matching (and picks the override up), then redirects back.
+/// name, resets any series with that name back to `unmatched`, then (for an
+/// id override with a metadata source) syncs those series with Hardcover
+/// right away and redirects back. A pasted series URL is resolved to its id
+/// first, so a bad URL fails here instead of on the next check. Validation
+/// and sync failures return to the form's page with an error popover.
 pub async fn save_override(
     State(state): State<AppState>,
     Form(form): Form<OverrideForm>,
 ) -> Result<Response, WebError> {
+    let back = if is_series_detail_path(&form.back) {
+        form.back.as_str()
+    } else {
+        "/unmatched"
+    };
     let ignore = form.ignore.is_some();
-    let hardcover_series_id = form.hardcover_series_id.trim();
-    if !ignore && hardcover_series_id.is_empty() {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            "enter a Hardcover series id or tick ignore",
-        )
-            .into_response());
+    let input = form.hardcover_series_id.trim();
+    if !ignore && input.is_empty() {
+        return Ok(error_redirect(
+            back,
+            "Enter a Hardcover series id or URL, or tick ignore.",
+        ));
     }
 
     // ignore=1 wins in the checker, so don't store a dangling id next to it.
-    let stored_id = (!ignore).then_some(hardcover_series_id);
+    let stored_id = if ignore {
+        None
+    } else {
+        match parse_series_ref(input) {
+            Some(SeriesRef::Id(id)) => Some(id.to_string()),
+            Some(SeriesRef::Slug(slug)) => {
+                let Some(metadata) = state.metadata.as_ref() else {
+                    return Ok(error_redirect(
+                        back,
+                        "Series URLs need the daemon's Hardcover client; enter the numeric id.",
+                    ));
+                };
+                match metadata.series_id_by_slug(slug).await {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        return Ok(error_redirect(
+                            back,
+                            &format!("No Hardcover series found for slug {slug:?}."),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, slug, "Hardcover slug lookup failed");
+                        return Ok(error_redirect(
+                            back,
+                            &format!("Hardcover lookup failed: {e}"),
+                        ));
+                    }
+                }
+            }
+            None => {
+                return Ok(error_redirect(
+                    back,
+                    "Expected a numeric Hardcover series id or a hardcover.app/series/... URL.",
+                ));
+            }
+        }
+    };
     let normalized = normalize_series_name(&form.abs_name);
-    queries::set_series_override(&state.pool, &normalized, stored_id, ignore).await?;
+    queries::set_series_override(&state.pool, &normalized, stored_id.as_deref(), ignore).await?;
 
     // Normalization happens in Rust, not SQL, so scan the (small) series
     // table for rows whose normalized name matches the override key.
+    let mut affected = Vec::new();
     for series in queries::list_series(&state.pool).await? {
         if normalize_series_name(&series.abs_name) == normalized {
+            // Re-pointed at a different Hardcover series: the old match's
+            // books would otherwise linger on the detail page.
+            if let (Some(old), Some(new)) = (&series.hardcover_series_id, &stored_id)
+                && old != new
+            {
+                queries::delete_known_releases_for_series(&state.pool, series.id).await?;
+            }
             queries::set_series_match(
                 &state.pool,
                 series.id,
@@ -570,10 +785,39 @@ pub async fn save_override(
                 MatchStatus::Unmatched,
             )
             .await?;
+            affected.push(series.id);
         }
     }
 
-    Ok(Redirect::to("/unmatched").into_response())
+    // A new id syncs straight away so the books appear without waiting for
+    // the next check. Without a metadata source the next check picks it up.
+    if stored_id.is_some()
+        && let Some(metadata) = state.metadata.as_ref()
+    {
+        let today = Utc::now().date_naive();
+        for id in affected {
+            // Archived series have no owned books; the next sync that sees
+            // them in ABS restores them and picks up the new match then.
+            let Some(series) = queries::get_series(&state.pool, id)
+                .await?
+                .filter(|series| series.archived_at.is_none())
+            else {
+                continue;
+            };
+            let name = series.abs_name.clone();
+            if let Err(e) =
+                checker::sync_series(&state.pool, metadata.as_ref(), today, series).await
+            {
+                tracing::error!(error = %e, series = %name, "Hardcover sync after override failed");
+                return Ok(error_redirect(
+                    back,
+                    &format!("Saved, but the Hardcover sync for {name} failed: {e}"),
+                ));
+            }
+        }
+    }
+
+    Ok(Redirect::to(back).into_response())
 }
 
 /// Form body for `POST /check`. `mode` defaults to a partial scan; the full
@@ -595,8 +839,8 @@ pub async fn run_now(State(state): State<AppState>, Form(form): Form<CheckForm>)
         ScanMode::Partial
     };
     match state.run_tx.try_send(mode) {
-        Ok(()) => Redirect::to("/"),
-        Err(_) => Redirect::to(&format!("/?flash={FLASH_ALREADY_RUNNING}")),
+        Ok(()) => Redirect::to("/status"),
+        Err(_) => Redirect::to(&format!("/status?flash={FLASH_ALREADY_RUNNING}")),
     }
 }
 
@@ -623,6 +867,7 @@ pub struct SettingsTemplate {
     audnexus_region: String,
     interval_options: Vec<IntervalOption>,
     check_db_path: String,
+    check_run_timeout_mins: u64,
     dashboard_enabled: bool,
     dashboard_bind: String,
     ntfy_enabled: bool,
@@ -746,6 +991,7 @@ fn settings_view(
         audnexus_region: config.audnexus.region.clone(),
         interval_options: interval_options(config.check.interval_days),
         check_db_path: config.check.db_path.clone(),
+        check_run_timeout_mins: config.check.run_timeout_mins,
         dashboard_enabled: config.dashboard.enabled,
         dashboard_bind: config.dashboard.bind.clone(),
         ntfy_enabled: config.notify.ntfy.enabled,
@@ -810,6 +1056,9 @@ pub struct SettingsForm {
     pub audnexus_region: String,
     pub check_interval_days: u64,
     pub check_db_path: String,
+    /// Absent in older form posts; keeps the current value then.
+    #[serde(default)]
+    pub check_run_timeout_mins: Option<u64>,
     #[serde(default)]
     pub dashboard_enabled: Option<String>,
     pub dashboard_bind: String,
@@ -865,6 +1114,9 @@ fn apply_settings_form(config: &mut config::Config, form: &SettingsForm) {
 
     config.check.interval_days = form.check_interval_days.max(1);
     config.check.db_path = form.check_db_path.trim().to_string();
+    if let Some(mins) = form.check_run_timeout_mins {
+        config.check.run_timeout_mins = mins;
+    }
 
     config.dashboard.enabled = form.dashboard_enabled.is_some();
     config.dashboard.bind = form.dashboard_bind.trim().to_string();
@@ -1012,10 +1264,21 @@ fn run_status_label(status: CheckRunStatus) -> &'static str {
         CheckRunStatus::Ok => "ok",
         CheckRunStatus::Partial => "partial",
         CheckRunStatus::Failed => "failed",
+        CheckRunStatus::TimedOut => "timed_out",
     }
 }
 
 /// `series.match_status` display label for the unmatched page.
+/// Status badge for a series: "archived" outranks the match status, since an
+/// archived series isn't checked regardless of how it was matched.
+fn series_status_label(status: MatchStatus, archived: bool) -> &'static str {
+    if archived {
+        "archived"
+    } else {
+        match_status_label(status)
+    }
+}
+
 fn match_status_label(status: MatchStatus) -> &'static str {
     match status {
         MatchStatus::Unmatched => "unmatched",
@@ -1028,7 +1291,7 @@ fn match_status_label(status: MatchStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::models::ReleaseStatus;
+    use crate::db::models::Series;
     use crate::db::queries::{
         finalize_check_run, get_series_override, insert_check_run, set_series_match,
         upsert_known_release, upsert_owned_book, upsert_series,
@@ -1115,6 +1378,7 @@ mod tests {
             run_tx,
             interval: Duration::from_secs(7 * 86_400),
             config_path: write_settings_config(),
+            metadata: None,
         };
         (router(state), pool, run_rx)
     }
@@ -1184,6 +1448,7 @@ to = ""
             run_tx,
             interval: Duration::from_secs(7 * 86_400),
             config_path: path.clone(),
+            metadata: None,
         };
         (router(state), path)
     }
@@ -1194,7 +1459,7 @@ to = ""
         abs_library_ids=lib-1%2C+lib-2&abs_startup_timeout_secs=120&\
         hc_token=&hc_min_request_interval_ms=1100&\
         hc_max_retries=3&hc_language=en&audnexus_enabled=1&audnexus_region=us&\
-        check_interval_days=14&check_db_path=test.db&\
+        check_interval_days=14&check_db_path=test.db&check_run_timeout_mins=45&\
         dashboard_enabled=1&dashboard_bind=127.0.0.1%3A8091&ntfy_server=&ntfy_topic=&\
         ntfy_token=&email_smtp_host=&email_smtp_port=587&email_username=&\
         email_password=&email_from=&email_to=";
@@ -1232,10 +1497,66 @@ to = ""
     }
 
     #[tokio::test]
+    async fn root_redirects_to_watchlist() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let (status, _) = get_page(&app, "/").await;
+
+        assert_eq!(status, StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn favicon_is_served_and_linked() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/favicon.svg")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
+
+        let (_, body) = get_page(&app, "/watchlist").await;
+        assert!(body.contains(r#"<link rel="icon" type="image/svg+xml" href="/favicon.svg">"#));
+    }
+
+    #[tokio::test]
+    async fn nav_lists_watchlist_first_and_status_before_settings() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let (_, body) = get_page(&app, "/watchlist").await;
+
+        let nav = &body[body.find("<nav>").unwrap()..body.find("</nav>").unwrap()];
+        let order: Vec<&str> = nav
+            .split("href=\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "/watchlist",
+                "/series",
+                "/upcoming",
+                "/new",
+                "/unmatched",
+                "/status",
+                "/settings"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn index_shows_runs_counts_and_interval() {
         let (app, _pool, _rx) = seeded_app().await;
 
-        let (status, body) = get_page(&app, "/").await;
+        let (status, body) = get_page(&app, "/status").await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Checking every week"), "{body}");
@@ -1262,7 +1583,7 @@ to = ""
     async fn index_renders_flash_message() {
         let (app, _pool, _rx) = seeded_app().await;
 
-        let (status, body) = get_page(&app, "/?flash=check-already-running").await;
+        let (status, body) = get_page(&app, "/status?flash=check-already-running").await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("already running"), "{body}");
@@ -1311,7 +1632,7 @@ to = ""
         let response = post_form(
             &app,
             "/overrides",
-            "abs_name=The+Wandering+Inn&hardcover_series_id=hc-99",
+            "abs_name=The+Wandering+Inn&hardcover_series_id=99",
         )
         .await;
 
@@ -1326,7 +1647,7 @@ to = ""
             .await
             .expect("lookup override")
             .expect("override present");
-        assert_eq!(row.hardcover_series_id.as_deref(), Some("hc-99"));
+        assert_eq!(row.hardcover_series_id.as_deref(), Some("99"));
         assert!(!row.ignore);
 
         // The previously matched series is reset for the next check.
@@ -1370,7 +1691,7 @@ to = ""
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_error_redirect(&response, "/unmatched");
         assert!(
             get_series_override(&pool, "mother of learning")
                 .await
@@ -1475,7 +1796,7 @@ to = ""
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_error_redirect(&response, "/series");
     }
 
     #[tokio::test]
@@ -1499,6 +1820,80 @@ to = ""
                 .await
                 .expect("seeded release present");
         id
+    }
+
+    #[tokio::test]
+    async fn upcoming_page_highlights_watched_rows_and_offers_state_filter() {
+        let (app, pool, _rx) = seeded_app().await;
+        let id = release_id(&pool, "hc-b2").await;
+        post_form(&app, "/watch", &format!("release_id={id}&remind_days=1")).await;
+
+        let (_, body) = get_page(&app, "/upcoming").await;
+
+        assert!(
+            body.contains(r#"data-state="watched" class="row-watched""#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"data-state-filter="upcoming-table""#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"<option value="watched">Watched</option>"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"<option value="unwatched">Unwatched</option>"#),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn series_page_highlights_ignored_rows_and_hides_them_by_default() {
+        let (app, _pool, _rx) = seeded_app().await;
+        post_form(
+            &app,
+            "/series/ignore",
+            "abs_name=Mother+of+Learning&action=ignore",
+        )
+        .await;
+
+        let (_, body) = get_page(&app, "/series").await;
+
+        assert!(
+            body.contains(r#"data-state="ignored" class="row-ignored""#),
+            "{body}"
+        );
+        assert!(body.contains(r#"data-state="active""#), "{body}");
+        assert!(
+            body.contains(r#"data-state-filter="series-table""#),
+            "{body}"
+        );
+        // "Not ignored" is the default selection, so ignored rows start hidden.
+        assert!(
+            body.contains(r#"<option value="active" selected>"#),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn archived_series_is_tagged_on_series_page_and_left_off_unmatched() {
+        let (app, pool, _rx) = seeded_app().await;
+        // Only "The Wandering Inn" is still in ABS; "Mother of Learning" goes.
+        queries::archive_missing_series(&pool, &["abs-1".to_string()])
+            .await
+            .expect("archive");
+
+        let (_, body) = get_page(&app, "/series").await;
+        assert!(
+            body.contains(r#"data-state="archived" class="row-ignored""#),
+            "{body}"
+        );
+        assert!(body.contains(r#"<option value="archived">"#), "{body}");
+        assert!(body.contains("status-archived"), "{body}");
+
+        let (_, body) = get_page(&app, "/unmatched").await;
+        assert!(!body.contains("Mother of Learning"), "{body}");
     }
 
     #[tokio::test]
@@ -1581,11 +1976,11 @@ to = ""
         let id = release_id(&pool, "hc-b2").await;
 
         let missing = post_form(&app, "/watch", "release_id=9999&remind_days=1").await;
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_error_redirect(&missing, "/watchlist");
 
         let bad_window =
             post_form(&app, "/watch", &format!("release_id={id}&remind_days=-1")).await;
-        assert_eq!(bad_window.status(), StatusCode::BAD_REQUEST);
+        assert_error_redirect(&bad_window, "/watchlist");
 
         let bad_direction = post_form(
             &app,
@@ -1593,7 +1988,7 @@ to = ""
             &format!("release_id={id}&remind_days=1&remind_when=during"),
         )
         .await;
-        assert_eq!(bad_direction.status(), StatusCode::BAD_REQUEST);
+        assert_error_redirect(&bad_direction, "/watchlist");
 
         assert!(
             crate::db::queries::list_watched_releases(&pool)
@@ -1687,7 +2082,7 @@ to = ""
             .await
             .expect("seed watch");
 
-        let (status, body) = get_page(&app, "/").await;
+        let (status, body) = get_page(&app, "/status").await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(
@@ -1719,7 +2114,7 @@ to = ""
         let response = post_form(&app, "/check", "").await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/");
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/status");
         // No explicit mode means a partial scan.
         assert_eq!(
             rx.try_recv().expect("run-now signal delivered"),
@@ -1752,7 +2147,7 @@ to = ""
         assert_eq!(second.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             second.headers().get(header::LOCATION).unwrap(),
-            "/?flash=check-already-running"
+            "/status?flash=check-already-running"
         );
     }
 
@@ -1790,6 +2185,7 @@ to = ""
 
         let saved = crate::config::load_file(&path).expect("reload saved config");
         assert_eq!(saved.check.interval_days, 14);
+        assert_eq!(saved.check.run_timeout_mins, 45);
         assert_eq!(saved.audiobookshelf.library_ids, vec!["lib-1", "lib-2"]);
         assert_eq!(saved.audiobookshelf.startup_timeout_secs, 120);
         // Blank secret fields keep the stored values.
@@ -1919,5 +2315,351 @@ to = ""
             "a: boom; b: bust"
         );
         assert_eq!(fmt_errors(Some("not json")), "not json");
+    }
+
+    /// Metadata stub for the override tests: resolves only the "the-expanse"
+    /// slug, to id 101. Series 101 has one upcoming book; series 500 fails.
+    struct SlugStub;
+
+    #[async_trait::async_trait]
+    impl crate::metadata::MetadataSource for SlugStub {
+        async fn find_series(
+            &self,
+            _name: &str,
+        ) -> Result<Vec<crate::metadata::SeriesCandidate>, crate::metadata::MetadataError> {
+            Ok(Vec::new())
+        }
+
+        async fn series_books(
+            &self,
+            id: &str,
+        ) -> Result<Vec<crate::metadata::RemoteBook>, crate::metadata::MetadataError> {
+            match id {
+                "101" => Ok(vec![crate::metadata::RemoteBook {
+                    source_book_id: "hc-x1".to_string(),
+                    title: "Leviathan Wakes".to_string(),
+                    position: Some(1.0),
+                    release_date: NaiveDate::from_ymd_opt(2999, 1, 1),
+                    asin: None,
+                }]),
+                "500" => Err(crate::metadata::MetadataError::Api("boom".to_string())),
+                _ => Ok(Vec::new()),
+            }
+        }
+
+        async fn series_slug(
+            &self,
+            _id: &str,
+        ) -> Result<Option<String>, crate::metadata::MetadataError> {
+            Ok(None)
+        }
+
+        async fn series_id_by_slug(
+            &self,
+            slug: &str,
+        ) -> Result<Option<String>, crate::metadata::MetadataError> {
+            Ok((slug == "the-expanse").then(|| "101".to_string()))
+        }
+    }
+
+    /// The seeded app, but with [`SlugStub`] as its metadata source.
+    async fn seeded_app_with_metadata() -> (Router, SqlitePool) {
+        let (_app, pool, _rx) = seeded_app().await;
+        let (run_tx, _run_rx) = mpsc::channel(1);
+        let state = AppState {
+            pool: pool.clone(),
+            run_tx,
+            interval: Duration::from_secs(7 * 86_400),
+            config_path: write_settings_config(),
+            metadata: Some(std::sync::Arc::new(SlugStub)),
+        };
+        (router(state), pool)
+    }
+
+    #[test]
+    fn parse_series_ref_accepts_ids_and_urls() {
+        assert_eq!(parse_series_ref(" 123 "), Some(SeriesRef::Id("123")));
+        assert_eq!(
+            parse_series_ref("https://hardcover.app/series/the-expanse"),
+            Some(SeriesRef::Slug("the-expanse"))
+        );
+        assert_eq!(
+            parse_series_ref("hardcover.app/series/the-expanse/books?x=1#top"),
+            Some(SeriesRef::Slug("the-expanse"))
+        );
+        assert_eq!(
+            parse_series_ref("https://www.hardcover.app/series/dune"),
+            Some(SeriesRef::Slug("dune"))
+        );
+        assert_eq!(parse_series_ref("https://hardcover.app/series/"), None);
+        assert_eq!(parse_series_ref("hc-99"), None);
+        assert_eq!(parse_series_ref("https://example.com/series/x"), None);
+    }
+
+    #[tokio::test]
+    async fn override_post_resolves_pasted_url_to_id() {
+        let (app, pool) = seeded_app_with_metadata().await;
+
+        let response = post_form(
+            &app,
+            "/overrides",
+            "abs_name=Mother+of+Learning&hardcover_series_id=https%3A%2F%2Fhardcover.app%2Fseries%2Fthe-expanse",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let row = get_series_override(&pool, "mother of learning")
+            .await
+            .expect("lookup override")
+            .expect("override present");
+        assert_eq!(row.hardcover_series_id.as_deref(), Some("101"));
+    }
+
+    #[tokio::test]
+    async fn override_post_unknown_slug_is_rejected() {
+        let (app, pool) = seeded_app_with_metadata().await;
+
+        let response = post_form(
+            &app,
+            "/overrides",
+            "abs_name=Mother+of+Learning&hardcover_series_id=https%3A%2F%2Fhardcover.app%2Fseries%2Fnope",
+        )
+        .await;
+
+        assert_error_redirect(&response, "/unmatched");
+        assert!(
+            get_series_override(&pool, "mother of learning")
+                .await
+                .expect("lookup override")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn override_post_url_without_metadata_source_is_rejected() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let response = post_form(
+            &app,
+            "/overrides",
+            "abs_name=Mother+of+Learning&hardcover_series_id=https%3A%2F%2Fhardcover.app%2Fseries%2Fthe-expanse",
+        )
+        .await;
+
+        assert_error_redirect(&response, "/unmatched");
+    }
+
+    #[tokio::test]
+    async fn override_post_rejects_non_numeric_id() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let response = post_form(
+            &app,
+            "/overrides",
+            "abs_name=Mother+of+Learning&hardcover_series_id=not-an-id",
+        )
+        .await;
+
+        assert_error_redirect(&response, "/unmatched");
+    }
+
+    #[tokio::test]
+    async fn override_post_returns_to_series_detail_page() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let response = post_form(
+            &app,
+            "/overrides",
+            "abs_name=The+Wandering+Inn&hardcover_series_id=5&back=%2Fseries%2F1",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/series/1"
+        );
+    }
+
+    /// Asserts `response` redirects to `path` with an `?error=` popover
+    /// message instead of rendering an error body.
+    fn assert_error_redirect(response: &Response, path: &str) {
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response.headers()[header::LOCATION].to_str().unwrap();
+        assert!(
+            location.starts_with(&format!("{path}?error=")),
+            "{location}"
+        );
+    }
+
+    #[test]
+    fn error_redirect_percent_encodes_the_message() {
+        let response = error_redirect("/series/3", "No match for \"a&b\"?");
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "/series/3?error=No+match+for+%22a%26b%22%3F"
+        );
+    }
+
+    #[tokio::test]
+    async fn override_post_syncs_new_id_and_drops_old_books() {
+        let (app, pool) = seeded_app_with_metadata().await;
+
+        let response = post_form(
+            &app,
+            "/overrides",
+            "abs_name=The+Wandering+Inn&hardcover_series_id=101&back=%2Fseries%2F1",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/series/1");
+        let series = crate::db::queries::get_series(&pool, 1)
+            .await
+            .expect("lookup series")
+            .expect("series present");
+        assert_eq!(series.match_status, MatchStatus::Overridden);
+        assert_eq!(series.hardcover_series_id.as_deref(), Some("101"));
+        // The old match's books are gone; the new series' book is stored but
+        // left unstamped for the next check to announce.
+        let known = crate::db::queries::known_releases_for_series(&pool, 1)
+            .await
+            .expect("known releases");
+        assert_eq!(known.len(), 1, "{known:?}");
+        assert_eq!(known[0].source_book_id, "hc-x1");
+        assert!(known[0].upcoming_notified_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn override_post_sync_failure_returns_with_error() {
+        let (app, pool) = seeded_app_with_metadata().await;
+
+        let response = post_form(
+            &app,
+            "/overrides",
+            "abs_name=The+Wandering+Inn&hardcover_series_id=500&back=%2Fseries%2F1",
+        )
+        .await;
+
+        assert_error_redirect(&response, "/series/1");
+        // The override itself is still saved for the next check to retry.
+        let row = get_series_override(&pool, "wandering inn")
+            .await
+            .expect("lookup override")
+            .expect("override present");
+        assert_eq!(row.hardcover_series_id.as_deref(), Some("500"));
+    }
+
+    #[tokio::test]
+    async fn unmatched_page_keeps_overridden_series_editable_and_hides_ignored() {
+        let (app, pool, _rx) = seeded_app().await;
+        // A hand-matched series stays on the page with its id prefilled.
+        let manual = upsert_series(&pool, "abs-3", "Cradle", false)
+            .await
+            .expect("seed series");
+        set_series_match(
+            &pool,
+            manual.id,
+            Some("777"),
+            None,
+            None,
+            MatchStatus::Overridden,
+        )
+        .await
+        .expect("mark overridden");
+        let ignored = upsert_series(&pool, "abs-4", "Hidden Saga", false)
+            .await
+            .expect("seed series");
+        set_series_match(&pool, ignored.id, None, None, None, MatchStatus::Ignored)
+            .await
+            .expect("mark ignored");
+
+        let (status, body) = get_page(&app, "/unmatched").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Cradle"), "{body}");
+        assert!(body.contains(r#"value="777""#), "{body}");
+        assert!(!body.contains("Hidden Saga"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn ignored_series_are_hidden_from_upcoming_and_new() {
+        let (app, pool, _rx) = seeded_app().await;
+        set_series_match(&pool, 1, None, None, None, MatchStatus::Ignored)
+            .await
+            .expect("mark ignored");
+
+        let (_, upcoming) = get_page(&app, "/upcoming").await;
+        let (_, new) = get_page(&app, "/new").await;
+
+        assert!(!upcoming.contains("Book Two"), "{upcoming}");
+        assert!(!new.contains("Book One"), "{new}");
+    }
+
+    #[tokio::test]
+    async fn new_page_keeps_when_column_on_one_line() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let (_, body) = get_page(&app, "/new").await;
+
+        assert!(
+            body.contains(r#"<td class="muted nowrap">2 days ago</td>"#),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn series_detail_shows_released_and_upcoming_with_watch() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let (status, body) = get_page(&app, "/series/1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("The Wandering Inn"), "{body}");
+        assert!(body.contains("Book Two"), "{body}");
+        assert!(body.contains("Book One"), "{body}");
+        assert!(body.contains("watch-open"), "{body}");
+        assert!(body.contains(r#"value="/series/1""#), "{body}");
+        // Change-match form prefilled with the current Hardcover id.
+        assert!(body.contains(r#"value="hc-1""#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn series_detail_unknown_id_is_404() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let (status, _) = get_page(&app, "/series/999").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn series_page_links_to_detail() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let (_, body) = get_page(&app, "/series").await;
+
+        assert!(body.contains(r#"href="/series/1""#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn watch_from_series_detail_redirects_back() {
+        let (app, _pool, _rx) = seeded_app().await;
+
+        let response = post_form(&app, "/watch", "release_id=1&back=%2Fseries%2F1").await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/series/1"
+        );
+    }
+
+    #[test]
+    fn series_detail_path_requires_numeric_id() {
+        assert!(is_series_detail_path("/series/12"));
+        assert!(!is_series_detail_path("/series/"));
+        assert!(!is_series_detail_path("/series/x"));
+        assert!(!is_series_detail_path("//evil.com"));
     }
 }

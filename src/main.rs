@@ -2,6 +2,7 @@
 //! All application logic lives in the library crate (`lib.rs`); this binary
 //! only wires config into clients and maps the check report to an exit code.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -82,7 +83,7 @@ async fn run_check(config: &config::Config, partial: bool) -> anyhow::Result<()>
     } else {
         checker::ScanMode::Full
     };
-    let report = checker::run_check(
+    let check = checker::run_check(
         &pool,
         &abs,
         &hardcover,
@@ -91,9 +92,10 @@ async fn run_check(config: &config::Config, partial: bool) -> anyhow::Result<()>
         &config.audiobookshelf.library_ids,
         chrono::Utc::now().date_naive(),
         mode,
-    )
-    .await
-    .context("check run aborted")?;
+    );
+    let report = checker::with_timeout(&pool, config.check.run_timeout(), check)
+        .await
+        .context("check run aborted")?;
 
     // Close cleanly before process::exit, which skips destructors.
     pool.close().await;
@@ -112,6 +114,8 @@ async fn run_daemon(
         .context("could not open the tracker database")?;
 
     let (abs, hardcover, enricher) = build_clients(config)?;
+    // Shared with the dashboard, which resolves pasted Hardcover URLs.
+    let hardcover = Arc::new(hardcover);
     let notifiers = build_notifiers(config);
 
     // ABS may live in the same container and start after us; block until it
@@ -154,11 +158,12 @@ async fn run_daemon(
     let scheduler = tokio::spawn(scheduler_loop(
         pool.clone(),
         abs,
-        hardcover,
+        hardcover.clone(),
         enricher,
         notifiers,
         config.audiobookshelf.library_ids.clone(),
         every,
+        config.check.run_timeout(),
         run_rx,
         shutdown_rx.clone(),
     ));
@@ -190,6 +195,7 @@ async fn run_daemon(
         run_tx: run_tx.clone(),
         interval: every,
         config_path,
+        metadata: Some(hardcover),
     };
     let mut server_shutdown = shutdown_rx.clone();
     let server = async move {
@@ -248,11 +254,12 @@ async fn run_daemon(
 async fn scheduler_loop(
     pool: SqlitePool,
     abs: AbsClient,
-    hardcover: HardcoverClient,
+    hardcover: Arc<HardcoverClient>,
     enricher: Option<AudnexusClient>,
     notifiers: Vec<Box<dyn Notifier>>,
     library_ids: Vec<String>,
     every: Duration,
+    run_timeout: Option<Duration>,
     mut run_rx: mpsc::Receiver<checker::ScanMode>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -285,18 +292,17 @@ async fn scheduler_loop(
 
         let today = chrono::Utc::now().date_naive();
 
-        match checker::run_check(
+        let check = checker::run_check(
             &pool,
             &abs,
-            &hardcover,
+            hardcover.as_ref(),
             enricher.as_ref(),
             &notifiers,
             &library_ids,
             today,
             mode,
-        )
-        .await
-        {
+        );
+        match checker::with_timeout(&pool, run_timeout, check).await {
             Ok(report) => tracing::info!(
                 status = ?report.status,
                 events_found = report.events_found,

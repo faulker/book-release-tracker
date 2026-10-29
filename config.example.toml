@@ -25,6 +25,7 @@ region = "us"
 interval_days = 7                # days between scheduled checks (daemon mode).
                                  # The dashboard offers daily/weekly/monthly presets.
 db_path = "book-tracker.db"
+run_timeout_mins = 120          # cancel a check run (status timed_out) after this long; 0 = no limit
 
 [dashboard]
 enabled = true                   # daemon mode only

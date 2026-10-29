@@ -260,6 +260,21 @@ impl MetadataSource for HardcoverClient {
         Ok(data.series.into_iter().next().and_then(|s| s.slug))
     }
 
+    async fn series_id_by_slug(&self, slug: &str) -> Result<Option<String>, MetadataError> {
+        let query = r#"
+            query SeriesBySlug($slug: String!) {
+                series(where: { slug: { _eq: $slug } }) {
+                    id
+                    name
+                    slug
+                    is_completed
+                }
+            }
+        "#;
+        let data: FindSeriesData = self.post_graphql(query, json!({ "slug": slug })).await?;
+        Ok(data.series.into_iter().next().map(|s| s.id.to_string()))
+    }
+
     async fn series_books(&self, source_series_id: &str) -> Result<Vec<RemoteBook>, MetadataError> {
         let series_id: i64 = source_series_id.parse().map_err(|_| {
             MetadataError::Api(format!("invalid Hardcover series id: {source_series_id:?}"))
@@ -645,6 +660,46 @@ mod tests {
         let client = client_for(&server, "test-token");
         let slug = client.series_slug("999").await.expect("series_slug");
         assert_eq!(slug, None);
+    }
+
+    #[tokio::test]
+    async fn series_id_by_slug_resolves_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("SeriesBySlug"))
+            .and(body_string_contains("the-expanse"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"data":{"series":[{"id":101,"name":"The Expanse","slug":"the-expanse","is_completed":true}]}}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server, "test-token");
+        let id = client
+            .series_id_by_slug("the-expanse")
+            .await
+            .expect("series_id_by_slug");
+        assert_eq!(id.as_deref(), Some("101"));
+    }
+
+    #[tokio::test]
+    async fn series_id_by_slug_unknown_returns_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"data":{"series":[]}}"#))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server, "test-token");
+        let id = client
+            .series_id_by_slug("nope")
+            .await
+            .expect("series_id_by_slug");
+        assert_eq!(id, None);
     }
 
     #[tokio::test]

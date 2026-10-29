@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>{% block title %}book-release-tracker{% endblock %}</title>
   <style>
     :root {
@@ -74,10 +75,15 @@
       font-variant-numeric: tabular-nums;
     }
     tr:hover > td { background: var(--paper-raised); }
+    /* Flagged rows: watched releases and ignored series. */
+    tr.row-watched > td { background: color-mix(in oklch, var(--accent) 12%, var(--paper)); }
+    tr.row-watched:hover > td { background: color-mix(in oklch, var(--accent) 18%, var(--paper)); }
+    tr.row-ignored > td { background: color-mix(in oklch, var(--ink-soft) 14%, var(--paper)); }
+    tr.row-ignored:hover > td { background: color-mix(in oklch, var(--ink-soft) 20%, var(--paper)); }
     td.title-cell { font-family: var(--serif); font-size: 1.02rem; }
     td.muted, .muted { color: var(--ink-soft); }
     /* Dates like 2026-07-25 would otherwise wrap at the hyphens. */
-    .date { white-space: nowrap; }
+    .date, .nowrap { white-space: nowrap; }
     td a {
       color: inherit; text-decoration: underline;
       text-decoration-color: var(--rule-strong); text-underline-offset: 2px;
@@ -89,10 +95,10 @@
     .status::before { content: "●"; font-size: 0.6rem; vertical-align: 0.12em; margin-right: 0.35rem; }
     .status-ok::before, .status-matched::before { color: var(--ok); }
     .status-partial::before, .status-unmatched::before { color: var(--warn); }
-    .status-failed::before { color: var(--bad); }
+    .status-failed::before, .status-timed_out::before { color: var(--bad); }
     .status-running::before, .status-overridden::before { color: var(--accent); }
-    .status-ignored { color: var(--ink-soft); }
-    .status-ignored::before { color: var(--rule-strong); }
+    .status-ignored, .status-archived { color: var(--ink-soft); }
+    .status-ignored::before, .status-archived::before { color: var(--rule-strong); }
 
     button {
       font: inherit; font-size: 0.83rem; letter-spacing: 0.02em;
@@ -122,6 +128,7 @@
       display: flex; flex-wrap: wrap; gap: 0.5rem 1.4rem; align-items: center;
     }
     .filter-bar input[type="search"] { width: min(24rem, 100%); }
+    .filter-bar select { font-size: 0.82rem; }
     .filter-bar label.toggle {
       font-size: 0.82rem; color: var(--ink-soft);
       display: flex; gap: 0.4rem; align-items: center; cursor: pointer;
@@ -163,6 +170,22 @@
       padding: 1.2rem 1.4rem; max-width: 24rem;
     }
     dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+
+    /* Error toast: form posts that fail redirect back with ?error=. */
+    #error-popover {
+      inset: auto 1rem 1rem auto; margin: 0;
+      max-width: min(26rem, calc(100vw - 2rem));
+      background: var(--paper-raised); color: var(--ink);
+      border: 1px solid var(--rule-strong); border-left: 4px solid var(--bad);
+      border-radius: 3px; padding: 0.75rem 0.9rem;
+      box-shadow: 0 6px 24px rgb(0 0 0 / 0.18);
+    }
+    #error-popover .toast-row { display: flex; gap: 0.8rem; align-items: start; }
+    #error-popover p { margin: 0; }
+    #error-popover button {
+      border: 0; background: none; color: var(--ink-soft);
+      font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 0;
+    }
     dialog h2 { margin: 0 0 0.9rem; }
     dialog .actions { margin-top: 1.1rem; }
   </style>
@@ -172,36 +195,60 @@
     <header class="masthead">
       <a class="brand" href="/">Book Release Tracker</a>
       <nav>
-        <a href="/">Status</a>
+        <a href="/watchlist">Watchlist</a>
         <a href="/series">Series</a>
         <a href="/upcoming">Upcoming</a>
         <a href="/new">New</a>
-        <a href="/watchlist">Watchlist</a>
         <a href="/unmatched">Unmatched</a>
+        <a href="/status">Status</a>
         <a href="/settings">Settings</a>
       </nav>
     </header>
     {% block content %}{% endblock %}
   </div>
+  <div id="error-popover" popover role="alert">
+    <div class="toast-row">
+      <p id="error-popover-text"></p>
+      <button type="button" popovertarget="error-popover" popovertargetaction="hide" aria-label="Dismiss">&times;</button>
+    </div>
+  </div>
   <script>
+    // Show ?error= as a popover, then drop it from the URL so a reload
+    // doesn't repeat it.
+    {
+      const params = new URLSearchParams(location.search);
+      const message = params.get("error");
+      if (message) {
+        document.getElementById("error-popover-text").textContent = message;
+        document.getElementById("error-popover").showPopover();
+        params.delete("error");
+        const query = params.toString();
+        history.replaceState(null, "", location.pathname + (query ? `?${query}` : "") + location.hash);
+      }
+    }
     // Underline the nav link for the page being viewed.
     for (const link of document.querySelectorAll("nav a")) {
       if (link.getAttribute("href") === location.pathname) {
         link.setAttribute("aria-current", "page");
       }
     }
-    // Row visibility combines two inputs per table: the text filter
-    // (input[data-filter]) and the hide-unscheduled toggle
-    // (input[data-toggle-unscheduled]), so neither clobbers the other.
+    // Row visibility combines three inputs per table: the text filter
+    // (input[data-filter]), the hide-unscheduled toggle
+    // (input[data-toggle-unscheduled]), and the state select
+    // (select[data-state-filter], matched against each row's data-state;
+    // empty shows all), so none clobbers the others.
     function applyRowFilters(tableId) {
       const filter = document.querySelector(`input[data-filter="${tableId}"]`);
       const toggle = document.querySelector(`input[data-toggle-unscheduled="${tableId}"]`);
+      const stateSelect = document.querySelector(`select[data-state-filter="${tableId}"]`);
       const needle = filter ? filter.value.trim().toLowerCase() : "";
       const hideUnscheduled = toggle ? toggle.checked : false;
+      const wantedState = stateSelect ? stateSelect.value : "";
       for (const row of document.querySelectorAll(`#${tableId} tbody tr`)) {
         const matchesText = needle === "" || (row.dataset.search || "").toLowerCase().includes(needle);
         const unscheduled = row.dataset.scheduled === "0";
-        row.hidden = !matchesText || (hideUnscheduled && unscheduled);
+        const matchesState = wantedState === "" || row.dataset.state === wantedState;
+        row.hidden = !matchesText || (hideUnscheduled && unscheduled) || !matchesState;
       }
     }
     for (const input of document.querySelectorAll("input[data-filter]")) {
@@ -216,6 +263,19 @@
         applyRowFilters(toggle.dataset.toggleUnscheduled);
       });
       if (toggle.checked) applyRowFilters(toggle.dataset.toggleUnscheduled);
+    }
+    // State selects also persist; the markup's selected option is the
+    // default until the user picks one.
+    for (const select of document.querySelectorAll("select[data-state-filter]")) {
+      const key = `state-filter:${select.dataset.stateFilter}`;
+      let saved = null;
+      try { saved = localStorage.getItem(key); } catch {}
+      if (saved !== null && [...select.options].some((o) => o.value === saved)) select.value = saved;
+      select.addEventListener("change", () => {
+        try { localStorage.setItem(key, select.value); } catch {}
+        applyRowFilters(select.dataset.stateFilter);
+      });
+      applyRowFilters(select.dataset.stateFilter);
     }
   </script>
 </body>

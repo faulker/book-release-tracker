@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+
+{% block title %}{{ abs_name }} - book-release-tracker{% endblock %}
+
+{% block content %}
+<p class="muted"><a href="/series">&larr; All series</a></p>
+<h1>{{ abs_name }}</h1>
+<p class="lede">
+  <span class="status status-{{ status }}">{{ status }}</span>
+  {% if !hardcover_url.is_empty() %}
+  &middot; <a href="{{ hardcover_url }}" target="_blank" rel="noopener">Hardcover page</a>
+  {% endif %}
+  {% if ignored %}&middot; Ignored series are skipped by every check.{% endif %}
+  {% if archived %}&middot; No longer in Audiobookshelf, so its books were removed. Re-add it there and the next check restores it.{% endif %}
+</p>
+
+<h2>Hardcover match</h2>
+<p class="muted">Wrong series? Paste the right Hardcover series URL or id. The next check re-matches it.</p>
+<form class="inline" method="post" action="/overrides">
+  <input type="hidden" name="abs_name" value="{{ abs_name }}">
+  <input type="hidden" name="back" value="/series/{{ id }}">
+  <input type="text" name="hardcover_series_id" value="{{ hardcover_id }}" placeholder="Hardcover series URL or id" aria-label="Hardcover series URL or id">
+  <button type="submit" class="ghost">Save</button>
+</form>
+
+<h2>Upcoming</h2>
+{% if upcoming.is_empty() %}
+<p class="empty">No upcoming books known.</p>
+{% else %}
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>#</th><th>Title</th><th>Release date</th><th>When</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for row in upcoming %}
+  <tr>
+    <td>{{ row.position }}</td>
+    <td class="title-cell">
+      {% if !row.book_url.is_empty() %}
+      <a href="{{ row.book_url }}" target="_blank" rel="noopener">{{ row.title }}</a>
+      {% else %}
+      {{ row.title }}
+      {% endif %}
+    </td>
+    <td class="date">{{ row.release_date }}</td>
+    <td class="muted nowrap">{{ row.when }}</td>
+    <td>
+      {% if row.watched %}
+      <form class="inline" method="post" action="/watch/remove">
+        <input type="hidden" name="release_id" value="{{ row.id }}">
+        <input type="hidden" name="back" value="/series/{{ id }}">
+        <button type="submit" class="quiet">Unwatch</button>
+      </form>
+      {% else %}
+      <button type="button" class="quiet watch-open" data-release-id="{{ row.id }}" data-title="{{ row.title }}">Watch</button>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<dialog id="watch-dialog">
+  <form method="post" action="/watch">
+    <h2>Watch <span id="watch-dialog-title"></span></h2>
+    <input type="hidden" name="release_id" value="">
+    <input type="hidden" name="back" value="/series/{{ id }}">
+    <label>Remind me
+      <input type="number" name="remind_days" class="days" value="1" min="0" max="365" aria-label="Days from release to remind">
+      day(s)</label>
+    <select name="remind_when" aria-label="Before or after release">
+      <option value="before" selected>before release</option>
+      <option value="after">after release</option>
+    </select>
+    <div class="actions">
+      <button type="submit">Watch</button>
+      <button type="button" class="ghost" id="watch-dialog-cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<script>
+  // Each Watch button opens the shared dialog, pre-targeted at its release.
+  const watchDialog = document.getElementById("watch-dialog");
+  for (const button of document.querySelectorAll("button.watch-open")) {
+    button.addEventListener("click", () => {
+      watchDialog.querySelector('input[name="release_id"]').value = button.dataset.releaseId;
+      document.getElementById("watch-dialog-title").textContent = button.dataset.title;
+      watchDialog.showModal();
+    });
+  }
+  document.getElementById("watch-dialog-cancel").addEventListener("click", () => watchDialog.close());
+</script>
+{% endif %}
+
+<h2>Released</h2>
+{% if released.is_empty() %}
+<p class="empty">No released books known.</p>
+{% else %}
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>#</th><th>Title</th><th>Release date</th><th>When</th><th>Owned</th></tr>
+  </thead>
+  <tbody>
+  {% for row in released %}
+  <tr>
+    <td>{{ row.position }}</td>
+    <td class="title-cell">
+      {% if !row.book_url.is_empty() %}
+      <a href="{{ row.book_url }}" target="_blank" rel="noopener">{{ row.title }}</a>
+      {% else %}
+      {{ row.title }}
+      {% endif %}
+    </td>
+    <td class="date">{{ row.release_date }}</td>
+    <td class="muted nowrap">{{ row.when }}</td>
+    <td>{% if row.owned %}<span class="status status-ok">owned</span>{% else %}<span class="muted">not owned</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

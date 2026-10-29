@@ -134,6 +134,11 @@
       <label for="check_db_path">Database path</label>
       <input type="text" id="check_db_path" name="check_db_path" value="{{ check_db_path }}" required>
     </div>
+    <div class="field">
+      <label for="check_run_timeout_mins">Run timeout (minutes)</label>
+      <input type="number" id="check_run_timeout_mins" name="check_run_timeout_mins" min="0" value="{{ check_run_timeout_mins }}" required>
+      <span class="hint">A check running longer than this is cancelled and marked timed out. 0 = no limit.</span>
+    </div>
   </fieldset>
 
   <fieldset>

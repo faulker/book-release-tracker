@@ -1,13 +1,16 @@
 //! Web dashboard (daemon mode only): server-rendered HTML over the tracker
 //! database, plus form posts for series overrides, run-now, and config-file
-//! edits (the settings page). The dashboard never talks to ABS or Hardcover
-//! itself; it reads what the checker wrote, nudges the scheduler through
-//! `run_tx`, and rewrites `config.toml` for the next daemon start.
+//! edits (the settings page). The dashboard never talks to ABS; it reads what
+//! the checker wrote, nudges the scheduler through `run_tx`, and rewrites
+//! `config.toml` for the next daemon start. Its Hardcover calls are
+//! resolving a pasted series URL to an id and syncing a series right after
+//! its override id is saved.
 
 pub mod handlers;
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -16,6 +19,7 @@ use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 
 use crate::checker::ScanMode;
+use crate::metadata::MetadataSource;
 
 /// Shared state for all dashboard handlers.
 #[derive(Clone)]
@@ -31,14 +35,23 @@ pub struct AppState {
     /// Path to `config.toml`; the settings page reads and rewrites it.
     /// Changes take effect on the next daemon start, not live.
     pub config_path: PathBuf,
+    /// Metadata source for resolving pasted series page URLs to ids on the
+    /// override form. `None` disables URL input (ids still work).
+    pub metadata: Option<Arc<dyn MetadataSource>>,
 }
 
 /// Builds the dashboard router. Separate from [`serve`] so tests can drive
 /// it directly with `tower::ServiceExt::oneshot`.
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(handlers::index))
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::to("/watchlist") }),
+        )
+        .route("/favicon.svg", get(favicon))
+        .route("/status", get(handlers::index))
         .route("/series", get(handlers::series))
+        .route("/series/{id}", get(handlers::series_detail))
         .route("/series/ignore", post(handlers::set_ignore))
         .route("/upcoming", get(handlers::upcoming))
         .route("/new", get(handlers::new_releases))
@@ -54,6 +67,20 @@ pub fn router(state: AppState) -> Router {
         .route("/overrides", post(handlers::save_override))
         .route("/check", post(handlers::run_now))
         .with_state(state)
+}
+
+/// App icon, compiled into the binary so the dashboard needs no static dir.
+const ICON_SVG: &str = include_str!("static/icon.svg");
+
+/// Serves the app icon used as the browser favicon.
+async fn favicon() -> impl axum::response::IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/svg+xml"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        ICON_SVG,
+    )
 }
 
 /// Serves the dashboard on `listener` until `shutdown` resolves, then stops

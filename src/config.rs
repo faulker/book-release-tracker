@@ -76,11 +76,28 @@ pub struct CheckConfig {
     #[serde(default = "default_interval_days")]
     pub interval_days: u64,
     pub db_path: String,
+    /// Minutes a single check run may take before it is cancelled and
+    /// recorded as `timed_out`. 0 disables the limit.
+    #[serde(default = "default_run_timeout_mins")]
+    pub run_timeout_mins: u64,
 }
 
 /// Default for `check.interval_days` when absent from the config file.
 fn default_interval_days() -> u64 {
     7
+}
+
+/// Default for `check.run_timeout_mins` when absent from the config file.
+fn default_run_timeout_mins() -> u64 {
+    120
+}
+
+impl CheckConfig {
+    /// The run timeout as a `Duration`, or `None` when disabled (0).
+    pub fn run_timeout(&self) -> Option<std::time::Duration> {
+        (self.run_timeout_mins > 0)
+            .then(|| std::time::Duration::from_secs(self.run_timeout_mins * 60))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +331,8 @@ mod tests {
         let config: Config = toml::from_str(&raw).expect("parse config.example.toml");
         assert_eq!(config.audiobookshelf.base_url, "https://audiobookshelf");
         assert_eq!(config.check.interval_days, 7);
+        assert_eq!(config.check.run_timeout_mins, 120);
+        assert!(config.check.run_timeout().is_some());
         assert_eq!(config.audiobookshelf.startup_timeout_secs, 300);
         assert_eq!(config.dashboard.bind, "127.0.0.1:8091");
         assert_eq!(config.hardcover.language, "en");
@@ -341,6 +360,7 @@ mod tests {
             check: CheckConfig {
                 interval_days: 7,
                 db_path: "test.db".into(),
+                run_timeout_mins: 120,
             },
             dashboard: DashboardConfig {
                 enabled: true,

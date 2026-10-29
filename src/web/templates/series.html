@@ -4,7 +4,7 @@
 
 {% block content %}
 <h1>Series</h1>
-<p class="lede">Everything being tracked, soonest release first. Series with a next book show its date; the rest show their most recent release. Ignored series are skipped by every check.</p>
+<p class="lede">Everything being tracked, soonest release first. Series with a next book show its date; the rest show their most recent release. Ignored series are skipped by every check and hidden from the upcoming, new, and unmatched pages. Series removed from Audiobookshelf are archived (their books dropped) and only show under the Archived filter; they come back on the next check after being re-added. Click a series to see its books and fix its match.</p>
 
 {% if rows.is_empty() %}
 <p class="empty">Nothing tracked yet — run a check to sync series from Audiobookshelf.</p>
@@ -15,6 +15,12 @@
     <input type="checkbox" data-toggle-unscheduled="series-table">
     Hide series without a scheduled release
   </label>
+  <select data-state-filter="series-table" aria-label="Filter by status">
+    <option value="">All series (incl. archived)</option>
+    <option value="active" selected>Not ignored</option>
+    <option value="ignored">Ignored</option>
+    <option value="archived">Archived</option>
+  </select>
 </div>
 <div class="table-scroll">
 <table id="series-table">
@@ -23,8 +29,8 @@
   </thead>
   <tbody>
   {% for row in rows %}
-  <tr data-search="{{ row.abs_name }} {{ row.authors }}" data-scheduled="{{ row.scheduled }}">
-    <td class="title-cell">{{ row.abs_name }}</td>
+  <tr data-search="{{ row.abs_name }} {{ row.authors }}" data-scheduled="{{ row.scheduled }}" data-state="{% if row.archived %}archived{% else if row.ignored %}ignored{% else %}active{% endif %}"{% if row.ignored || row.archived %} class="row-ignored"{% endif %}>
+    <td class="title-cell"><a href="/series/{{ row.id }}">{{ row.abs_name }}</a></td>
     <td class="muted">{{ row.authors }}</td>
     <td><span class="status status-{{ row.status }}">{{ row.status }}</span></td>
     <td>

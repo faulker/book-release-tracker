@@ -22,6 +22,10 @@ pub trait MetadataSource: Send + Sync {
     /// backfill slugs for series matched (or overridden) before the slug was
     /// stored; `None` when the source has no slug for it.
     async fn series_slug(&self, source_series_id: &str) -> Result<Option<String>, MetadataError>;
+    /// The source id of the series with this URL slug (the reverse of
+    /// `series_slug`). The dashboard uses it to turn a pasted series page URL
+    /// into an override id; `None` when no series has that slug.
+    async fn series_id_by_slug(&self, slug: &str) -> Result<Option<String>, MetadataError>;
 }
 
 /// A candidate series match returned by `find_series`, before scoring in matching.rs.

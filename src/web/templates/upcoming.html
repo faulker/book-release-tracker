@@ -10,6 +10,11 @@
 {% else %}
 <div class="filter-bar">
   <input type="search" data-filter="upcoming-table" placeholder="Filter by series or author&hellip;" aria-label="Filter releases">
+  <select data-state-filter="upcoming-table" aria-label="Filter by watch status">
+    <option value="" selected>All releases</option>
+    <option value="watched">Watched</option>
+    <option value="unwatched">Unwatched</option>
+  </select>
 </div>
 <div class="table-scroll">
 <table id="upcoming-table">
@@ -18,7 +23,7 @@
   </thead>
   <tbody>
   {% for row in rows %}
-  <tr data-search="{{ row.series }} {{ row.author }}">
+  <tr data-search="{{ row.series }} {{ row.author }}" data-state="{% if row.watched %}watched{% else %}unwatched{% endif %}"{% if row.watched %} class="row-watched"{% endif %}>
     <td>
       {% if !row.series_url.is_empty() %}
       <a href="{{ row.series_url }}" target="_blank" rel="noopener">{{ row.series }}</a>
@@ -38,7 +43,7 @@
     </td>
     <td>{{ row.position }}</td>
     <td class="date">{{ row.release_date }}</td>
-    <td class="muted">{{ row.when }}</td>
+    <td class="muted nowrap">{{ row.when }}</td>
     <td>
       {% if row.watched %}
       <form class="inline" method="post" action="/watch/remove">

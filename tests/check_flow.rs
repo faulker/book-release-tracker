@@ -98,6 +98,10 @@ impl MetadataSource for StubMetadata {
     async fn series_slug(&self, _id: &str) -> Result<Option<String>, MetadataError> {
         Ok(Some("stub-series".into()))
     }
+
+    async fn series_id_by_slug(&self, _slug: &str) -> Result<Option<String>, MetadataError> {
+        Ok(Some("900".into()))
+    }
 }
 
 /// Opens a file-backed temp database; the tempdir guard must stay alive for
@@ -832,4 +836,119 @@ async fn enrichment_failure_is_non_fatal_and_event_proceeds_unenriched() {
         release_state(&pool, "1002").await,
         ("released".into(), false, true)
     );
+}
+
+/// Archived state and owned-book count for one ABS series id.
+async fn series_archive_state(pool: &SqlitePool, abs_series_id: &str) -> (bool, i64) {
+    sqlx::query_as(
+        "SELECT s.archived_at IS NOT NULL, \
+                (SELECT COUNT(*) FROM owned_books ob WHERE ob.series_id = s.id) \
+         FROM series s WHERE s.abs_series_id = ?",
+    )
+    .bind(abs_series_id)
+    .fetch_one(pool)
+    .await
+    .expect("series row")
+}
+
+#[tokio::test]
+async fn series_removed_from_abs_is_archived_and_restored_when_re_added() {
+    let abs_server = MockServer::start().await;
+    let hc_server = MockServer::start().await;
+    mount_abs_two_series(&abs_server).await;
+    mount_hardcover_find_series(&hc_server).await;
+    mount_hardcover_books_happy(&hc_server).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = temp_db(&dir).await;
+    let abs = abs_client(&abs_server);
+    let hardcover = hardcover_client(&hc_server);
+    let notifiers: Vec<Box<dyn Notifier>> = vec![Box::new(RecordingNotifier::default())];
+    let run = || {
+        run_check(
+            &pool,
+            &abs,
+            &hardcover,
+            None,
+            &notifiers,
+            &[],
+            today(),
+            ScanMode::Full,
+        )
+    };
+
+    run().await.expect("first run");
+    assert_eq!(series_archive_state(&pool, "ser2").await, (false, 1));
+
+    // "Dungeon Crawler Carl" (ser2) disappears from ABS.
+    abs_server.reset().await;
+    mount_abs_single_series(&abs_server).await;
+    let report = run().await.expect("second run");
+    assert_eq!(report.series_checked, 1);
+    assert_eq!(series_archive_state(&pool, "ser1").await, (false, 1));
+    assert_eq!(series_archive_state(&pool, "ser2").await, (true, 0));
+    let (known,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM known_releases kr JOIN series s ON s.id = kr.series_id \
+         WHERE s.abs_series_id = 'ser2'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    assert_eq!(known, 0);
+
+    // Re-added in ABS: the next sync restores the series and its books.
+    abs_server.reset().await;
+    mount_abs_two_series(&abs_server).await;
+    let report = run().await.expect("third run");
+    assert_eq!(report.series_checked, 2);
+    assert_eq!(series_archive_state(&pool, "ser2").await, (false, 1));
+}
+
+#[tokio::test]
+async fn abs_returning_no_series_archives_nothing() {
+    let abs_server = MockServer::start().await;
+    let hc_server = MockServer::start().await;
+    mount_abs_two_series(&abs_server).await;
+    mount_hardcover_find_series(&hc_server).await;
+    mount_hardcover_books_happy(&hc_server).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = temp_db(&dir).await;
+    let abs = abs_client(&abs_server);
+    let hardcover = hardcover_client(&hc_server);
+    let notifiers: Vec<Box<dyn Notifier>> = vec![Box::new(RecordingNotifier::default())];
+    let run = || {
+        run_check(
+            &pool,
+            &abs,
+            &hardcover,
+            None,
+            &notifiers,
+            &[],
+            today(),
+            ScanMode::Full,
+        )
+    };
+
+    run().await.expect("first run");
+
+    abs_server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/libraries"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "libraries": [{"id": "lib1", "name": "Audiobooks", "mediaType": "book"}]
+        })))
+        .mount(&abs_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/libraries/lib1/series"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [], "total": 0, "limit": 100, "page": 0
+        })))
+        .mount(&abs_server)
+        .await;
+    run().await.expect("empty run");
+
+    assert_eq!(series_archive_state(&pool, "ser1").await, (false, 1));
+    assert_eq!(series_archive_state(&pool, "ser2").await, (false, 1));
 }

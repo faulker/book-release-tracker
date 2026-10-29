@@ -55,6 +55,8 @@ region = "us"        # Audnexus storefront region
 [check]
 interval_minutes = 360        # daemon mode only: time between checks
 db_path = "book-tracker.db"   # SQLite file (or ":memory:")
+run_timeout_mins = 120        # cancel a check that runs longer than this and record
+                              # it as timed_out on the dashboard. 0 = no limit.
 scan_cooldown_days = 14       # skip scheduled scans while a completed scan is
                               # younger than this; manual runs always scan. 0 disables.
 
@@ -141,15 +143,21 @@ On startup it prints the check interval and the dashboard URL. Logs default to `
 
 Dashboard pages:
 
-- `/` : recent check-run history, headline counts, and "Run check" (partial) / "Run full scan" buttons (skipped if a check is already running or queued)
-- `/series` : every tracked series sorted by next release date (soonest first, unscheduled last) with author, match status, the next scheduled release, and (when nothing is scheduled) its last release date; each row has an ignore/unignore button, a search box filters by series or author, and a toggle hides series without a scheduled release
-- `/upcoming` : releases with a future date, soonest first, filterable by series or author; each row links the series to its Hardcover page, the author to an Audible author search, and (when an ASIN is known) the title to its Audible page, and has a Watch button that opens a popup asking how many days before or after release to remind you
+- `/` : redirects to `/watchlist`, the default page
+- `/status` : recent check-run history, headline counts, and "Run check" (partial) / "Run full scan" buttons (skipped if a check is already running or queued)
+- `/series` : every tracked series sorted by next release date (soonest first, unscheduled last) with author, match status, the next scheduled release, and (when nothing is scheduled) its last release date; each series name links to its detail page, each row has an ignore/unignore button, a search box filters by series or author, a toggle hides series without a scheduled release, and a status filter shows all, ignored, not-ignored, or archived series (ignored and archived ones are shaded and hidden by default)
+- `/upcoming` : releases with a future date, soonest first, filterable by series or author; each row links the series to its Hardcover page, the author to an Audible author search, and (when an ASIN is known) the title to its Audible page, and has a Watch button that opens a popup asking how many days before or after release to remind you; watched rows are tinted, and a filter narrows the list to watched or unwatched releases
+- `/series/{id}` : one series' upcoming and released books (owned ones marked), with Watch buttons on upcoming books and a form to change its Hardcover match by pasting a series URL or id
 - `/new` : recently released books, filterable by series or author, with the same series/author/title links as `/upcoming`
 - `/watchlist` : releases you're watching, with their reminder window (editable until the reminder is sent) and a remove button; a reminder fires once per watch, through every enabled notification channel, when `release_date` plus/minus the configured day offset arrives (e.g. 1 day before, or 7 days after for audiobooks that lag the print date)
-- `/unmatched` : series the matcher couldn't resolve, with a form to enter a Hardcover series id (or tick "ignore" to stop trying); submitting resets that series so the next check picks up the override
+- `/unmatched` : series the matcher couldn't resolve, plus series you matched by hand (so a wrong id can be corrected), with a form that takes a Hardcover series id or a pasted `https://hardcover.app/series/{slug}` URL (resolved to its id on save), or tick "ignore" to stop trying; saving an id syncs that series with Hardcover right away (dropping books from a previous match), and new books are announced on the next check
 - `/settings` : edit every `config.toml` field from the browser; saving validates and rewrites the file atomically (comments are not preserved), and changes take effect the next time the daemon starts. Secret fields never display their stored value; leave one blank to keep it, or type a new value to replace it. Env var overrides (`BRT_*`) still win at startup
 
-Ignoring a series (from `/series` or `/unmatched`) stores an override keyed by normalized name, so it sticks across library re-syncs; ignored series are never matched or checked again until unignored.
+Form errors (a bad id, a failed Hardcover lookup or sync) return you to the same page with a dismissable popover rather than an error page.
+
+Ignoring a series (from `/series` or `/unmatched`) stores an override keyed by normalized name, so it sticks across library re-syncs; ignored series are never matched or checked again until unignored, and their books are hidden from `/upcoming`, `/new`, and `/unmatched`.
+
+When a check's ABS sync no longer lists a series, it's archived: its owned books, known releases, and watches are deleted, but the series row and its Hardcover match are kept. Archived series only show on `/series` under the Archived filter. If the series shows up in ABS again, the next check un-archives it and pulls its books back in. A sync that returns no series at all archives nothing, so an empty or misconfigured ABS can't wipe the database. Narrowing `library_ids` counts as removal, so series from libraries you drop get archived too.
 
 ## Build & test
 
@@ -172,7 +180,16 @@ scripts/build-linux.sh            # x86_64
 scripts/build-linux.sh aarch64    # arm64 (Raspberry Pi, Graviton, etc.)
 ```
 
-The binary lands in `target/<arch>-unknown-linux-musl/release/book-release-tracker`. Copy it to the target machine along with your `config.toml` (the `migrations/` directory and web templates are embedded in the binary at compile time). Building natively on a Linux box also works with a plain `cargo build --release`.
+The script wraps `cargo zigbuild`, which you can also run directly:
+
+```sh
+cargo zigbuild --release --target x86_64-unknown-linux-musl   # static binary (what the script builds)
+cargo zigbuild --release --target x86_64-unknown-linux-gnu    # glibc binary
+```
+
+Don't use a plain `cargo build --target ...-linux-...` on macOS. It links with Apple's `ld`, which fails with `ld: unknown options: --as-needed -Bstatic ...`.
+
+The binary lands in `target/<arch>-unknown-linux-musl/release/book-release-tracker` (or `-linux-gnu` for the glibc build). Copy it to the target machine along with your `config.toml` (the `migrations/` directory and web templates are embedded in the binary at compile time). Building natively on a Linux box also works with a plain `cargo build --release`.
 
 ## How it works
 

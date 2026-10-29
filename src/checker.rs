@@ -61,7 +61,7 @@ impl CheckReport {
         match self.status {
             CheckRunStatus::Ok => 0,
             CheckRunStatus::Partial => 1,
-            CheckRunStatus::Failed | CheckRunStatus::Running => 2,
+            CheckRunStatus::Failed | CheckRunStatus::TimedOut | CheckRunStatus::Running => 2,
         }
     }
 }
@@ -79,7 +79,7 @@ enum SyncError {
 /// Failures while processing a single series. These are isolated: the error
 /// string goes into the report and the loop moves on to the next series.
 #[derive(Debug, Error)]
-enum SeriesError {
+pub enum SeriesError {
     #[error("database error: {0}")]
     Db(#[from] QueryError),
     #[error("metadata error: {0}")]
@@ -191,6 +191,38 @@ pub async fn run_check(
     Ok(report)
 }
 
+/// Runs `check` (a [`run_check`] future) under `timeout`. When the deadline
+/// passes the run is cancelled (the future is dropped), every `check_runs`
+/// row still marked `running` is stamped `timed_out`, and a `TimedOut`
+/// report comes back. Runs are strictly serial, so the only running row is
+/// the one just cancelled. `None` means no limit.
+pub async fn with_timeout(
+    pool: &SqlitePool,
+    timeout: Option<std::time::Duration>,
+    check: impl std::future::Future<Output = Result<CheckReport, CheckError>>,
+) -> Result<CheckReport, CheckError> {
+    let Some(limit) = timeout else {
+        return check.await;
+    };
+    match tokio::time::timeout(limit, check).await {
+        Ok(result) => result,
+        Err(_) => {
+            let message = format!("check run timed out after {}s", limit.as_secs());
+            error!(
+                timeout_secs = limit.as_secs(),
+                "check run timed out; cancelled"
+            );
+            queries::time_out_running_check_runs(pool, &message).await?;
+            Ok(CheckReport {
+                status: CheckRunStatus::TimedOut,
+                series_checked: 0,
+                events_found: 0,
+                errors: vec![message],
+            })
+        }
+    }
+}
+
 /// Sends reminder notifications for watched releases whose reminder window
 /// (`release_date + remind_offset_days`) has arrived, stamping each watch
 /// once at least one notifier delivered it. Returns how many reminders were
@@ -254,6 +286,9 @@ async fn finalize(pool: &SqlitePool, run_id: i64, report: &CheckReport) -> Resul
 /// their series, and each series' items from ABS, upserting `series` and
 /// `owned_books` rows as it goes. `is_completed` is passed as `false` since
 /// ABS has no completion concept; Hardcover's flag is a matching-time detail.
+/// Once every library has synced, series ABS no longer lists are archived
+/// (their books dropped); a sync that returns no series at all archives
+/// nothing, so an empty or misconfigured ABS can't wipe the database.
 async fn sync_abs(
     pool: &SqlitePool,
     abs: &AbsClient,
@@ -265,8 +300,10 @@ async fn sync_abs(
     }
 
     let mut synced = Vec::new();
+    let mut seen_abs_ids = Vec::new();
     for library in &libraries {
         for abs_series in abs.series(&library.id).await? {
+            seen_abs_ids.push(abs_series.id.clone());
             let row = queries::upsert_series(pool, &abs_series.id, &abs_series.name, false).await?;
 
             let items = abs.series_items(&library.id, &abs_series.id).await?;
@@ -289,6 +326,18 @@ async fn sync_abs(
             synced.push(SyncedSeries { row, owned });
         }
     }
+
+    if seen_abs_ids.is_empty() {
+        warn!("ABS returned no series; skipping archive of missing series");
+    } else {
+        let archived = queries::archive_missing_series(pool, &seen_abs_ids).await?;
+        if archived > 0 {
+            info!(
+                archived,
+                "archived series no longer listed in Audiobookshelf"
+            );
+        }
+    }
     Ok(synced)
 }
 
@@ -308,6 +357,23 @@ fn sequence_for_series(metadata: &ItemMetadata, abs_series_id: &str) -> Option<f
 /// `"asin": ""` rather than omitting the field.
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|v| !v.trim().is_empty())
+}
+
+/// Re-syncs one series against the metadata source outside a check run.
+/// The dashboard calls this after a match override changes so the new
+/// Hardcover series' books show up immediately. Owned books come from the
+/// database (no ABS call), and nothing is notified: new events stay
+/// unstamped for the next scheduled check. Returns the number of events
+/// found.
+pub async fn sync_series(
+    pool: &SqlitePool,
+    metadata: &dyn MetadataSource,
+    today: NaiveDate,
+    series: Series,
+) -> Result<usize, SeriesError> {
+    let owned = queries::owned_books_for_series(pool, series.id).await?;
+    let synced = SyncedSeries { row: series, owned };
+    process_series(pool, metadata, None, &[], today, &synced).await
 }
 
 /// Steps 3-6 for one series: resolve its Hardcover match, diff remote books
@@ -362,6 +428,11 @@ async fn process_series(
 
     // Steps 5-6: enrich, notify, and stamp only when >=1 notifier succeeded.
     let event_count = events.len();
+    // No notifiers (a dashboard-triggered sync): leave every event unstamped
+    // so the next scheduled check announces it.
+    if notifiers.is_empty() {
+        return Ok(event_count);
+    }
     for mut event in events {
         enrich_event(&mut event, enricher).await;
 
@@ -729,5 +800,52 @@ mod tests {
             EventKey::from_event(&data),
             EventKey::from_book("Book Two", Some(date), Some(2.0))
         );
+    }
+
+    #[tokio::test]
+    async fn with_timeout_cancels_and_marks_run_timed_out() {
+        let pool = crate::db::init(":memory:").await.expect("init db");
+        let run_id = queries::insert_check_run(&pool).await.expect("insert run");
+
+        let report = with_timeout(
+            &pool,
+            Some(std::time::Duration::from_millis(20)),
+            std::future::pending::<Result<CheckReport, CheckError>>(),
+        )
+        .await
+        .expect("timeout report");
+
+        assert_eq!(report.status, CheckRunStatus::TimedOut);
+        assert_eq!(report.exit_code(), 2);
+        let runs = queries::recent_check_runs(&pool, 5).await.expect("runs");
+        assert_eq!(runs[0].id, run_id);
+        assert_eq!(runs[0].status, CheckRunStatus::TimedOut);
+        assert!(runs[0].finished_at.is_some());
+        assert!(
+            runs[0]
+                .errors
+                .as_deref()
+                .unwrap_or_default()
+                .contains("timed out")
+        );
+    }
+
+    #[tokio::test]
+    async fn with_timeout_passes_through_a_finished_run() {
+        let pool = crate::db::init(":memory:").await.expect("init db");
+        let done = CheckReport {
+            status: CheckRunStatus::Ok,
+            series_checked: 1,
+            events_found: 0,
+            errors: Vec::new(),
+        };
+
+        let report = with_timeout(&pool, Some(std::time::Duration::from_secs(5)), async {
+            Ok(done.clone())
+        })
+        .await
+        .expect("report");
+
+        assert_eq!(report, done);
     }
 }

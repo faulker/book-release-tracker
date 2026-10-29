@@ -29,7 +29,8 @@ pub enum NotifiedKind {
 
 /// Inserts a series, or updates its ABS-sourced fields (name, completed flag)
 /// if `abs_series_id` already exists. Never touches match/Hardcover fields,
-/// so a re-sync doesn't undo prior matching work.
+/// so a re-sync doesn't undo prior matching work. Seeing a series in ABS
+/// again un-archives it.
 pub async fn upsert_series(
     pool: &SqlitePool,
     abs_series_id: &str,
@@ -42,7 +43,8 @@ pub async fn upsert_series(
         VALUES (?, ?, ?)
         ON CONFLICT(abs_series_id) DO UPDATE SET
             abs_name = excluded.abs_name,
-            is_completed = excluded.is_completed
+            is_completed = excluded.is_completed,
+            archived_at = NULL
         RETURNING *
         "#,
     )
@@ -94,16 +96,49 @@ pub async fn upsert_owned_book(
     Ok(book)
 }
 
-/// All series with the given `match_status`, e.g. `Unmatched` for the
-/// dashboard's review queue.
+/// All active (non-archived) series with the given `match_status`, e.g.
+/// `Unmatched` for the dashboard's review queue.
 pub async fn get_series_by_match_status(
     pool: &SqlitePool,
     status: MatchStatus,
 ) -> Result<Vec<Series>, QueryError> {
-    let rows = sqlx::query_as::<_, Series>("SELECT * FROM series WHERE match_status = ?")
-        .bind(status)
-        .fetch_all(pool)
+    let rows = sqlx::query_as::<_, Series>(
+        "SELECT * FROM series WHERE match_status = ? AND archived_at IS NULL",
+    )
+    .bind(status)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// One tracked series by id, if it exists (`GET /series/{id}`).
+pub async fn get_series(pool: &SqlitePool, id: i64) -> Result<Option<Series>, QueryError> {
+    let row = sqlx::query_as::<_, Series>("SELECT * FROM series WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
         .await?;
+
+    Ok(row)
+}
+
+/// Every known release of one series in reading order (position, then
+/// date; unpositioned books last), for the series detail page.
+pub async fn list_series_releases(
+    pool: &SqlitePool,
+    series_id: i64,
+) -> Result<Vec<KnownRelease>, QueryError> {
+    let rows = sqlx::query_as::<_, KnownRelease>(
+        r#"
+        SELECT * FROM known_releases
+        WHERE series_id = ?
+        ORDER BY position IS NULL, position ASC,
+                 release_date IS NULL, release_date ASC
+        "#,
+    )
+    .bind(series_id)
+    .fetch_all(pool)
+    .await?;
 
     Ok(rows)
 }
@@ -207,6 +242,73 @@ pub async fn known_releases_for_series(
             .await?;
 
     Ok(rows)
+}
+
+/// All `owned_books` rows for one series, for re-diffing a series without
+/// re-reading ABS.
+pub async fn owned_books_for_series(
+    pool: &SqlitePool,
+    series_id: i64,
+) -> Result<Vec<OwnedBook>, QueryError> {
+    let rows = sqlx::query_as::<_, OwnedBook>("SELECT * FROM owned_books WHERE series_id = ?")
+        .bind(series_id)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows)
+}
+
+/// Archives every active series whose ABS id is not in `seen_abs_ids` and
+/// deletes its owned books and known releases (watches cascade), all in one
+/// transaction. The series row and its match survive so a later sync that
+/// sees it again can restore it. Returns the number of series archived.
+pub async fn archive_missing_series(
+    pool: &SqlitePool,
+    seen_abs_ids: &[String],
+) -> Result<u64, QueryError> {
+    let mut tx = pool.begin().await?;
+    let archived = sqlx::query(
+        r#"
+        UPDATE series SET archived_at = ?
+        WHERE archived_at IS NULL
+          AND abs_series_id NOT IN (SELECT value FROM json_each(?))
+        "#,
+    )
+    .bind(Utc::now())
+    // One JSON array param instead of an IN list, so large libraries can't
+    // hit sqlite's bound-parameter limit.
+    .bind(serde_json::to_string(seen_abs_ids)?)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    // Also sweeps rows left on already-archived series, keeping this idempotent.
+    for table in ["owned_books", "known_releases"] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE series_id IN \
+             (SELECT id FROM series WHERE archived_at IS NOT NULL)"
+        ))
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    Ok(archived)
+}
+
+/// Deletes every `known_releases` row for one series (watches cascade).
+/// Used when a series is re-pointed at a different Hardcover series, so
+/// books from the old match don't linger.
+pub async fn delete_known_releases_for_series(
+    pool: &SqlitePool,
+    series_id: i64,
+) -> Result<(), QueryError> {
+    sqlx::query("DELETE FROM known_releases WHERE series_id = ?")
+        .bind(series_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
 }
 
 /// Releases due an "upcoming" notification: a future `release_date`, not yet
@@ -369,6 +471,25 @@ pub async fn finalize_check_run(
     Ok(())
 }
 
+/// Marks every check run still `running` as `timed_out`, stamping
+/// `finished_at` and recording `message` as its only error. Called after a
+/// run is cancelled for exceeding the configured timeout.
+pub async fn time_out_running_check_runs(
+    pool: &SqlitePool,
+    message: &str,
+) -> Result<u64, QueryError> {
+    let errors_json = serde_json::to_string(&[message])?;
+    let result = sqlx::query(
+        "UPDATE check_runs SET finished_at = ?, status = 'timed_out', errors = ? WHERE status = 'running'",
+    )
+    .bind(Utc::now())
+    .bind(errors_json)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Most recent check runs, newest first, for the dashboard status page.
 pub async fn recent_check_runs(pool: &SqlitePool, limit: i64) -> Result<Vec<CheckRun>, QueryError> {
     let rows =
@@ -381,13 +502,15 @@ pub async fn recent_check_runs(pool: &SqlitePool, limit: i64) -> Result<Vec<Chec
 }
 
 /// Releases with `status = 'upcoming'`, sorted by `release_date` ascending
-/// with `NULL` dates last (`GET /upcoming`).
+/// with `NULL` dates last (`GET /upcoming`). Releases of ignored series are
+/// left out.
 pub async fn list_upcoming_releases(pool: &SqlitePool) -> Result<Vec<KnownRelease>, QueryError> {
     let rows = sqlx::query_as::<_, KnownRelease>(
         r#"
-        SELECT * FROM known_releases
-        WHERE status = 'upcoming'
-        ORDER BY release_date IS NULL, release_date ASC
+        SELECT kr.* FROM known_releases kr
+        JOIN series s ON s.id = kr.series_id
+        WHERE kr.status = 'upcoming' AND s.match_status != 'ignored'
+        ORDER BY kr.release_date IS NULL, kr.release_date ASC
         "#,
     )
     .fetch_all(pool)
@@ -397,12 +520,14 @@ pub async fn list_upcoming_releases(pool: &SqlitePool) -> Result<Vec<KnownReleas
 }
 
 /// Releases with `status = 'released'`, newest first (`GET /new`).
+/// Releases of ignored series are left out.
 pub async fn list_new_releases(pool: &SqlitePool) -> Result<Vec<KnownRelease>, QueryError> {
     let rows = sqlx::query_as::<_, KnownRelease>(
         r#"
-        SELECT * FROM known_releases
-        WHERE status = 'released'
-        ORDER BY release_date DESC
+        SELECT kr.* FROM known_releases kr
+        JOIN series s ON s.id = kr.series_id
+        WHERE kr.status = 'released' AND s.match_status != 'ignored'
+        ORDER BY kr.release_date DESC
         "#,
     )
     .fetch_all(pool)
@@ -584,6 +709,7 @@ pub async fn list_series_overview(
             s.id,
             s.abs_name,
             s.match_status,
+            s.archived_at,
             (SELECT GROUP_CONCAT(DISTINCT ob.author)
                FROM owned_books ob
               WHERE ob.series_id = s.id AND ob.author IS NOT NULL) AS authors,
@@ -1127,6 +1253,84 @@ mod tests {
         );
         // Removing again is a no-op, not an error.
         remove_watch(&pool, release.id).await.expect("remove again");
+    }
+
+    #[tokio::test]
+    async fn archive_missing_series_drops_books_and_upsert_restores() {
+        let pool = test_pool().await;
+        let kept = upsert_series(&pool, "abs-keep", "Kept", false)
+            .await
+            .expect("upsert kept");
+        let gone = upsert_series(&pool, "abs-gone", "Gone", false)
+            .await
+            .expect("upsert gone");
+        for (series_id, item) in [(kept.id, "li-keep"), (gone.id, "li-gone")] {
+            upsert_owned_book(&pool, series_id, item, "Book", Some(1.0), None, None, None)
+                .await
+                .expect("upsert book");
+        }
+        let release = upsert_known_release(
+            &pool,
+            gone.id,
+            "hc-gone",
+            "Gone 2",
+            Some(2.0),
+            None,
+            ReleaseStatus::Upcoming,
+            None,
+        )
+        .await
+        .expect("upsert release");
+        add_watch(&pool, release.id, 0).await.expect("add watch");
+
+        let archived = archive_missing_series(&pool, &["abs-keep".to_string()])
+            .await
+            .expect("archive");
+        assert_eq!(archived, 1);
+
+        let gone_row = get_series(&pool, gone.id).await.expect("get").expect("row");
+        assert!(gone_row.archived_at.is_some());
+        assert!(
+            owned_books_for_series(&pool, gone.id)
+                .await
+                .expect("books")
+                .is_empty()
+        );
+        assert!(
+            known_releases_for_series(&pool, gone.id)
+                .await
+                .expect("kr")
+                .is_empty()
+        );
+        assert!(
+            watched_release_ids(&pool)
+                .await
+                .expect("watches")
+                .is_empty()
+        );
+        // The kept series is untouched.
+        let kept_row = get_series(&pool, kept.id).await.expect("get").expect("row");
+        assert!(kept_row.archived_at.is_none());
+        assert_eq!(
+            owned_books_for_series(&pool, kept.id)
+                .await
+                .expect("books")
+                .len(),
+            1
+        );
+
+        // Re-running is a no-op for an already-archived series.
+        let again = archive_missing_series(&pool, &["abs-keep".to_string()])
+            .await
+            .expect("archive again");
+        assert_eq!(again, 0);
+
+        // Seen in ABS again: same row comes back active.
+        let restored = upsert_series(&pool, "abs-gone", "Gone", false)
+            .await
+            .expect("restore");
+        assert_eq!(restored.id, gone.id);
+        assert!(restored.archived_at.is_none());
     }
 
     #[tokio::test]

@@ -32,6 +32,9 @@ pub enum CheckRunStatus {
     Ok,
     Partial,
     Failed,
+    /// The run exceeded `check.run_timeout_mins` and was cancelled.
+    #[sqlx(rename = "timed_out")]
+    TimedOut,
 }
 
 /// One ABS series being tracked, and its (possibly still-unmatched) Hardcover
@@ -48,6 +51,8 @@ pub struct Series {
     pub is_completed: bool,
     pub match_status: MatchStatus,
     pub last_checked_at: Option<DateTime<Utc>>,
+    /// Set when the series disappeared from ABS; NULL while active.
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 /// A book the user owns in ABS, belonging to a tracked series.
@@ -71,6 +76,7 @@ pub struct SeriesOverview {
     pub id: i64,
     pub abs_name: String,
     pub match_status: MatchStatus,
+    pub archived_at: Option<DateTime<Utc>>,
     /// Distinct authors of owned books in this series, comma-joined by SQL.
     pub authors: Option<String>,
     /// Title of the soonest upcoming release with a future date.
